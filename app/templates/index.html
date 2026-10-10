@@ -563,8 +563,8 @@
               <table class="table table-hover table-sm">
                 <thead>
                   <tr>
-                    <th scope="col" style="width: 30px;">
-                      <input type="checkbox" v-if="fileSelect.selectDir && fileSelect.selectShare" @click="toggleSelectAll" :checked="fileSelect.fileList.length > 0 && fileSelect.selectedFids.length === fileSelect.fileList.length" />&nbsp;<i class="bi bi-check"></i>
+                    <th scope="col" style="width: 30px;" v-if="fileSelect.selectDir && fileSelect.selectShare">
+                      <input type="checkbox" @click="toggleSelectAll" :checked="fileSelect.fileList.length > 0 && fileSelect.selectedFids.length === fileSelect.fileList.length" />&nbsp;<i class="bi bi-check"></i>
                     </th>
                     <th scope="col" class="cursor-pointer" @click="sortFileList('file_name')">
                       文件名
