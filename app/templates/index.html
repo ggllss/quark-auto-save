@@ -364,7 +364,7 @@
                       <div class="input-group">
                         <input type="text" name="shareurl[]" class="form-control" v-model="task.shareurl" placeholder="必填" @blur="changeShareurl(task)">
                         <div class="input-group-append" v-if="task.shareurl">
-                          <button type="button" class="btn btn-outline-secondary" @click="fileSelect.selectDir=true;fileSelect.switchShare=false;fileSelect.previewRegex=false;fileSelect.sortBy='file_name';fileSelect.sortOrder='desc';showShareSelect(index)" title="选择文件夹"><i class="bi bi-folder"></i></button>
+                          <button type="button" class="btn" :class="task.fid_list ? 'btn-success' : 'btn-outline-secondary'" @click="fileSelect.selectDir=true;fileSelect.switchShare=false;fileSelect.previewRegex=false;fileSelect.sortBy='file_name';fileSelect.sortOrder='desc';showShareSelect(index)" title="选择需转存的文件夹/内容（默认全选）"><i class="bi bi-folder"></i> 选择转存内容</button>
                           <div class="input-group-text">
                             <a target="_blank" :href="task.shareurl"><i class="bi bi-box-arrow-up-right"></i></a>
                           </div>
@@ -563,6 +563,9 @@
               <table class="table table-hover table-sm">
                 <thead>
                   <tr>
+                    <th scope="col" style="width: 30px;">
+                      <input type="checkbox" v-if="fileSelect.selectDir && fileSelect.selectShare" @click="toggleSelectAll" :checked="fileSelect.fileList.length > 0 && fileSelect.selectedFids.length === fileSelect.fileList.length" />&nbsp;<i class="bi bi-check"></i>
+                    </th>
                     <th scope="col" class="cursor-pointer" @click="sortFileList('file_name')">
                       文件名
                       <span v-if="fileSelect.sortBy === 'file_name'">{{ fileSelect.sortOrder === "asc" ? "↑" : "↓" }}</span>
@@ -586,6 +589,9 @@
                 </thead>
                 <tbody>
                   <tr v-for="(file, key) in fileSelect.fileList" :key="key" @click="fileSelect.selectDir ? (file.dir ? navigateTo(file.fid, file.file_name) : null) : selectStartFid(file.fid)" :class="{'cursor-pointer': fileSelect.selectDir ? file.dir : true}">
+                    <td v-if="fileSelect.selectDir && fileSelect.selectShare">
+                      <input type="checkbox" :checked="fileSelect.selectedFids.includes(file.fid)" @click.stop="toggleFileSelect(file.fid)" />
+                    </td>
                     <td><i class="bi mr-1" :class="file.dir ? 'bi-folder-fill text-warning' : 'bi-file-earmark'"></i>{{file.file_name}}</td>
                     <td v-if="fileSelect.selectShare" :class="file.file_name_re ? 'text-success' : file.file_name_saved ? 'text-muted' : 'text-danger'">{{file.file_name_re || file.file_name_saved || '&times;'}}</td>
                     <template v-if="!fileSelect.previewRegex">
@@ -600,9 +606,16 @@
             </div>
           </div>
           <div class="modal-footer" v-if="fileSelect.selectDir && !fileSelect.previewRegex">
-            <span>{{ fileSelect.selectShare ? '转存：' : '保存到：' }}</span>
-            <button type="button" class="btn btn-primary btn-sm" @click="selectCurrentFolder()">当前文件夹</button>
-            <button type="button" class="btn btn-primary btn-sm" v-if="!fileSelect.selectShare" @click="selectCurrentFolder(true)">当前文件夹<span class="badge badge-light" v-if="fileSelect.index<this.formData.tasklist.length">/{{ formData.tasklist[fileSelect.index].taskname }}</span></button>
+            <span v-if="fileSelect.selectDir && fileSelect.selectShare">
+              <i class="bi bi-check2-square mr-1 text-primary"></i> 已选 {{ fileSelect.selectedFids.length }} / {{ fileSelect.fileList.length }} 项
+            </span>
+            <span v-else>
+              {{ fileSelect.selectShare ? '转存：' : '保存到：' }}
+            </span>
+            <button type="button" class="btn btn-primary btn-sm" v-if="!fileSelect.selectShare && !fileSelect.selectMode" @click="selectCurrentFolder()">当前文件夹</button>
+            <button type="button" class="btn btn-primary btn-sm" v-if="!fileSelect.selectShare && !fileSelect.selectMode" @click="selectCurrentFolder(true)">当前文件夹<span class="badge badge-light" v-if="fileSelect.index<this.formData.tasklist.length">/{{ formData.tasklist[fileSelect.index].taskname }}</span></button>
+            <button type="button" class="btn btn-secondary btn-sm" v-if="fileSelect.selectDir && fileSelect.selectShare" @click="confirmManualSelect">确认转存</button>
+            <button type="button" class="btn btn-secondary btn-sm" v-if="fileSelect.selectDir && fileSelect.selectShare" @click="cancelManualSelect">取消</button>
           </div>
         </div>
       </div>
@@ -693,7 +706,10 @@
           switchShare: false,
           previewRegex: false,
           sortBy: "updated_at",
-          sortOrder: "desc"
+          sortOrder: "desc",
+          // 手动勾选转存模式
+          selectMode: false,
+          selectedFids: [],
         },
       },
       filters: {
@@ -1205,6 +1221,8 @@
               this.sortFileList(this.fileSelect.sortBy, this.fileSelect.sortOrder);
               this.fileSelect.paths = response.data.data.paths;
               this.fileSelect.stoken = response.data.data.stoken;
+              // 打开弹窗时默认全选（若之前已保存过勾选，则沿用保存的勾选）
+              this.preselectTransferFiles();
             } else {
               this.fileSelect.error = response.data.data.error
             }
@@ -1215,10 +1233,21 @@
             this.modalLoading = false;
           });
         },
+        // 计算默认勾选：优先沿用任务已保存的 fid_list，否则全选
+        preselectTransferFiles() {
+          const list = this.fileSelect.fileList || [];
+          const allFids = list.map(f => f.fid);
+          const index = this.fileSelect.index;
+          const task = (index !== null && index !== undefined) ? this.formData.tasklist[index] : null;
+          const saved = (task && Array.isArray(task.fid_list)) ? task.fid_list : [];
+          const kept = allFids.filter(fid => saved.includes(fid));
+          this.fileSelect.selectedFids = kept.length > 0 ? kept : allFids.slice();
+        },
         showShareSelect(index, shareurl = null) {
           this.fileSelect.selectShare = true;
           this.fileSelect.fileList = [];
           this.fileSelect.paths = [];
+          this.fileSelect.selectedFids = [];
           this.fileSelect.error = undefined;
           // 如果分享链接发生变化，则重置 stoken
           const newShareurl = shareurl || this.formData.tasklist[index].shareurl
@@ -1229,6 +1258,88 @@
           this.fileSelect.index = index;
           $('#fileSelectModal').modal('toggle');
           this.getShareDetail();
+        },
+        // 手动勾选转存模式
+        openManualSelect(index) {
+          const task = this.formData.tasklist[index];
+          this.fileSelect.selectDir = true;
+          this.fileSelect.selectShare = false;
+          this.fileSelect.switchShare = false;
+          this.fileSelect.previewRegex = false;
+          this.fileSelect.modalLoading = true;
+          this.fileSelect.error = undefined;
+          this.fileSelect.selectMode = true;
+          // 先获取分享详情
+          const shareurl = task.shareurl;
+          if (shareurl) {
+            this.$http.post('/get_share_detail', { shareurl, stoken: '' }).then(response => {
+              if (response.data.success) {
+                this.fileSelect.fileList = response.data.data.list;
+                this.fileSelect.paths = response.data.data.paths || [];
+                // 默认全部勾选
+                this.fileSelect.selectedFids = this.fileSelect.fileList.map(f => f.fid);
+                this.fileSelect.index = index;
+                this.formData.tasklist[index].fid_list = this.fileSelect.selectedFids;
+              } else {
+                this.fileSelect.error = response.data.data.error || '获取资源列表失败';
+              }
+              this.fileSelect.modalLoading = false;
+              $('#fileSelectModal').modal('toggle');
+            }).catch(error => {
+              console.error('Error getting folders:', error);
+              this.fileSelect.error = '获取资源列表失败';
+              this.fileSelect.modalLoading = false;
+              $('#fileSelectModal').modal('toggle');
+            });
+          } else {
+            this.fileSelect.error = '请先输入分享链接';
+            this.fileSelect.modalLoading = false;
+            $('#fileSelectModal').modal('toggle');
+          }
+        },
+        toggleSelectAll() {
+          if (this.fileSelect.fileList) {
+            const allSelected = this.fileSelect.selectedFids.length === this.fileSelect.fileList.length;
+            if (allSelected) {
+              // 取消全选
+              this.fileSelect.selectedFids = [];
+            } else {
+              // 全选
+              this.fileSelect.selectedFids = this.fileSelect.fileList.map(f => f.fid);
+            }
+          }
+        },
+        // 切换单个文件勾选状态
+        toggleFileSelect(fid) {
+          if (this.fileSelect.selectedFids.includes(fid)) {
+            this.fileSelect.selectedFids = this.fileSelect.selectedFids.filter(id => id !== fid);
+          } else {
+            this.fileSelect.selectedFids.push(fid);
+          }
+        },
+        confirmManualSelect() {
+          const index = this.fileSelect.index;
+          if (index !== undefined && index !== null) {
+            this.formData.tasklist[index].fid_list = this.fileSelect.selectedFids;
+          }
+          this.fileSelect.selectMode = false;
+          this.fileSelect.selectedFids = [];
+          this.fileSelect.selectDir = true;
+          this.fileSelect.selectShare = true;
+          this.fileSelect.switchShare = false;
+          this.fileSelect.previewRegex = false;
+          this.fileSelect.modalLoading = false;
+          $('#fileSelectModal').modal('hide');
+        },
+        cancelManualSelect() {
+          this.fileSelect.selectMode = false;
+          this.fileSelect.selectedFids = [];
+          this.fileSelect.selectDir = true;
+          this.fileSelect.selectShare = true;
+          this.fileSelect.switchShare = false;
+          this.fileSelect.previewRegex = false;
+          this.fileSelect.modalLoading = false;
+          $('#fileSelectModal').modal('hide');
         },
         switchShare(index) {
           const data = this.smart_param.taskSuggestions.data;
