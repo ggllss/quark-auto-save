@@ -890,6 +890,15 @@ class Quark:
                 pwd_id, stoken, share_file_list[0]["fid"]
             )["data"]["list"]
 
+        # 手动勾选转存：仅转存用户在转存页手动勾选的文件/文件夹
+        # 仅在顶层生效，选中的文件夹仍按原有逻辑递归/整文件夹转存
+        manual_fids = task.get("fid_list")
+        if manual_fids and subdir_path == "":
+            print(f"📋 手动勾选转存，已选 {len(manual_fids)} 个文件/文件夹")
+            share_file_list = [
+                f for f in share_file_list if f["fid"] in manual_fids
+            ]
+
         # 获取目标目录文件列表
         savepath = re.sub(r"/{2,}", "/", f"/{task['savepath']}{subdir_path}")
         if not self.savepath_fid.get(savepath):
