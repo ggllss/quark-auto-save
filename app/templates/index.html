@@ -1320,7 +1320,17 @@
         confirmManualSelect() {
           const index = this.fileSelect.index;
           if (index !== undefined && index !== null) {
-            this.formData.tasklist[index].fid_list = this.fileSelect.selectedFids;
+            const task = this.formData.tasklist[index];
+            // 弹窗内可能已切换分享链接（搜索结果 / 上一个 / 下一个 / 进入子目录），
+            // 确认时必须同步回任务，否则任务仍指向旧链接
+            const newShareurl = this.fileSelect.shareurl;
+            if (newShareurl && newShareurl !== task.shareurl) {
+              this.$set(task, "shareurl_ban", undefined);
+              task.shareurl = newShareurl;
+              // 旧链接的「文件起始」fid 已失效，清空以免沿用导致漏转
+              this.$set(task, "startfid", undefined);
+            }
+            task.fid_list = this.fileSelect.selectedFids;
           }
           this.fileSelect.selectMode = false;
           this.fileSelect.selectedFids = [];
