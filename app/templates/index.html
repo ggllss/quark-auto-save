@@ -1263,6 +1263,9 @@
                 model: "",
                 timeout: 60
               }, config_data.ai || {});
+              // 手写配置里 enable 可能是 JSON 布尔，统一成字符串，
+              // 否则复选框的 true-value="true" 比较会显示成未勾选
+              config_data.ai.enable = (config_data.ai.enable === true || config_data.ai.enable === "true") ? "true" : "false";
               this.formData = config_data;
               setTimeout(() => {
                 this.configModified = false;
