@@ -1,0 +1,304 @@
+#!/usr/bin/env node
+/**
+ * 前端（app/templates/index.html 内联 Vue 组件）回归测试。
+ *
+ * 运行方式（需要 node，无需浏览器与服务器）：
+ *   node tests/test_frontend.js
+ *
+ * 做法：抽取模板里的内联脚本，在 Node 中 stub 掉 Vue/axios/jQuery 后执行，
+ * 拿到真实的组件选项对象，再驱动其中的方法，验证行为而不是语法。
+ */
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+const ROOT = path.dirname(__dirname);
+const TEMPLATE = path.join(ROOT, 'app', 'templates', 'index.html');
+const html = fs.readFileSync(TEMPLATE, 'utf8');
+
+let passed = 0;
+let failed = 0;
+
+function check(name, cond, extra) {
+  if (cond) {
+    console.log('  \u2705 ' + name);
+    passed++;
+  } else {
+    console.log('  \u274c ' + name + (extra !== undefined ? '  \u2192 ' + JSON.stringify(extra) : ''));
+    failed++;
+  }
+}
+
+/** 按花括号配对抽出一个方法定义 */
+function extractMethod(src, name) {
+  const i = src.indexOf(name + '() {');
+  if (i < 0) throw new Error('方法未找到: ' + name);
+  let depth = 0;
+  for (let j = src.indexOf('{', i); j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}') {
+      depth--;
+      if (depth === 0) return src.slice(i, j + 1);
+    }
+  }
+  throw new Error('花括号不配对: ' + name);
+}
+
+// ---------------------------------------------------------------- 载入组件
+const TAG = '\n  <script>\n';
+const scriptStart = html.indexOf(TAG);
+if (scriptStart < 0) {
+  console.error('未找到内联 <script> 块');
+  process.exit(1);
+}
+const inlineJs = html.slice(scriptStart + TAG.length, html.indexOf('\n  </script>', scriptStart));
+
+let options = null;
+global.Vue = function (opts) { options = opts; };
+global.Vue.set = function (o, k, v) { o[k] = v; };
+global.$ = () => ({ modal() {}, collapse() {}, tooltip() {}, on() {} });
+global.document = { addEventListener() {}, removeEventListener() {} };
+global.window = { addEventListener() {}, removeEventListener() {}, innerWidth: 1200 };
+// Node 21+ 内置了只读的 global.navigator，直接赋值在严格模式下会抛错
+try {
+  Object.defineProperty(global, 'navigator', {
+    value: { userAgent: 'node-test' }, configurable: true, writable: true
+  });
+} catch (e) {
+  /* 无法覆盖时沿用 Node 自带实现即可 */
+}
+
+const calls = [];
+global.axios = {
+  get(url) {
+    calls.push(['GET', url]);
+    return Promise.resolve(global.__nextGet || { data: { success: true, data: {} } });
+  },
+  post(url, body) {
+    calls.push(['POST', url, body]);
+    return Promise.resolve(global.__nextResponse || { data: { success: false } });
+  }
+};
+
+// 用 new Function 执行：其函数体默认是「宽松模式」，与浏览器的行为一致。
+// 上游模板大量依赖隐式全局（config_data / parentDir / dir / params 等都未声明），
+// 若用严格模式的 eval 执行会直接抛 ReferenceError。
+new Function(inlineJs)();
+if (!options) {
+  console.error('未能捕获 Vue 组件（脚本执行失败）');
+  process.exit(1);
+}
+
+const ctx = Object.assign({}, JSON.parse(JSON.stringify(options.data)), options.methods);
+ctx.showToast = function () {};
+ctx.$set = function (o, k, v) { o[k] = v; };
+const tick = () => new Promise(r => setTimeout(r, 5));
+
+// -------------------------------------------------------------------- 用例
+async function testComponent() {
+  console.log('【1】组件加载与状态初始化');
+  check('捕获到 Vue 组件', !!options);
+  check('aiForm 已初始化', !!ctx.aiForm && typeof ctx.aiForm.keyword === 'string');
+  check('formData.ai 有默认值（模板绑定不会踩 undefined）', !!ctx.formData.ai, ctx.formData.ai);
+  check('fileSelect 有默认值', !!ctx.fileSelect && Array.isArray(ctx.fileSelect.selectedFids));
+}
+
+function testHandlers() {
+  console.log('【2】模板中调用的方法都已定义');
+  const templateOnly = html.slice(0, scriptStart);
+  const defined = new Set();
+  for (const m of inlineJs.matchAll(/^        (?:async\s+)?([A-Za-z_$][\w$]*)\s*\(/gm)) defined.add(m[1]);
+  for (const m of inlineJs.matchAll(/^          ([A-Za-z_$][\w$]*)\s*:/gm)) defined.add(m[1]);
+
+  const builtins = new Set(['$set', '$delete', '$emit', 'parseInt', 'parseFloat', 'String',
+    'Number', 'Boolean', 'JSON', 'Math', 'Date', 'Array', 'Object', 'alert', 'confirm',
+    'prompt', 'console', 'if', 'for', 'while', 'switch', 'catch', 'return', 'typeof',
+    'function', '$event']);
+  const missing = [];
+  for (const m of templateOnly.matchAll(/(?:@|v-on:)[\w.]+="([^"]*)"/g)) {
+    for (const c of m[1].matchAll(/([A-Za-z_$][\w$]*)\s*\(/g)) {
+      if (!defined.has(c[1]) && !builtins.has(c[1]) && !missing.includes(c[1])) missing.push(c[1]);
+    }
+  }
+  check('无未定义的事件处理器', missing.length === 0, missing);
+}
+
+async function testConfirmManualSelect() {
+  console.log('【3】confirmManualSelect：分享链接回写（历史 bug 回归）');
+  global.$ = () => ({ modal() {} });
+  const methods = eval('({' + extractMethod(inlineJs, 'confirmManualSelect') + '})');
+
+  function makeCtx(task, fileSelect) {
+    return Object.assign({
+      fileSelect: Object.assign({ index: 0, selectedFids: [], shareurl: '' }, fileSelect),
+      formData: { tasklist: [task] },
+      $set: (o, k, v) => { o[k] = v; }
+    }, methods);
+  }
+
+  const changed = { shareurl: 'OLD', startfid: 'old_fid', fid_list: ['a'], shareurl_ban: 'err' };
+  makeCtx(changed, { shareurl: 'NEW', selectedFids: ['x', 'y'] }).confirmManualSelect();
+  check('换链接后任务链接同步更新', changed.shareurl === 'NEW', changed.shareurl);
+  check('shareurl_ban 被清除', changed.shareurl_ban === undefined);
+  check('旧链接的 startfid 被清空', changed.startfid === undefined);
+  check('fid_list 更新为本次勾选', JSON.stringify(changed.fid_list) === JSON.stringify(['x', 'y']));
+
+  const same = { shareurl: 'SAME', startfid: 'keep', fid_list: ['a'] };
+  makeCtx(same, { shareurl: 'SAME', selectedFids: ['x'] }).confirmManualSelect();
+  check('链接未变时不动 startfid', same.startfid === 'keep', same.startfid);
+  check('链接未变时仍更新 fid_list', JSON.stringify(same.fid_list) === JSON.stringify(['x']));
+
+  const blank = { shareurl: 'OLD2', startfid: 'keep' };
+  makeCtx(blank, { shareurl: '', selectedFids: ['z'] }).confirmManualSelect();
+  check('shareurl 为空时不覆盖任务链接', blank.shareurl === 'OLD2', blank.shareurl);
+}
+
+function testSelectAll() {
+  console.log('【4】转存内容勾选的默认全选与全选框');
+  const methods = eval('({' + extractMethod(inlineJs, 'preselectTransferFiles') + ','
+    + extractMethod(inlineJs, 'toggleSelectAll') + '})');
+  const list = [{ fid: 'a' }, { fid: 'b' }, { fid: 'c' }];
+
+  function makeCtx(savedFids) {
+    return Object.assign({
+      fileSelect: { fileList: list, selectedFids: [], index: 0 },
+      formData: { tasklist: [{ fid_list: savedFids }] }
+    }, methods);
+  }
+
+  const fresh = makeCtx(undefined);
+  fresh.preselectTransferFiles();
+  check('首次打开默认全选', fresh.fileSelect.selectedFids.length === 3);
+  fresh.toggleSelectAll();
+  check('点全选框可取消全选', fresh.fileSelect.selectedFids.length === 0);
+  fresh.toggleSelectAll();
+  check('再点可恢复全选', fresh.fileSelect.selectedFids.length === 3);
+
+  const saved = makeCtx(['a', 'c']);
+  saved.preselectTransferFiles();
+  check('已保存过勾选时沿用保存值',
+    JSON.stringify(saved.fileSelect.selectedFids) === JSON.stringify(['a', 'c']),
+    saved.fileSelect.selectedFids);
+
+  const partial = makeCtx(undefined);
+  partial.preselectTransferFiles();
+  partial.fileSelect.selectedFids = partial.fileSelect.selectedFids.filter(id => id !== 'b');
+  partial.toggleSelectAll();
+  check('部分勾选后点全选框补齐', partial.fileSelect.selectedFids.length === 3);
+}
+
+async function testAiFlow() {
+  console.log('【5】AI 追剧流程');
+  check('AI 方法齐全',
+    ['aiSearch', 'aiAnalyze', 'aiCommit', 'aiToggleAll', 'aiSelectedCount',
+      'aiApplyPreset', 'aiTestConnection'].every(m => typeof ctx[m] === 'function'));
+
+  ctx.aiForm.keyword = '   ';
+  calls.length = 0;
+  ctx.aiSearch();
+  await tick();
+  check('空输入不发请求', calls.filter(c => c[1] === '/ai/search').length === 0);
+
+  calls.length = 0;
+  ctx.aiForm.keyword = '背着善宰跑';
+  global.__nextResponse = {
+    data: {
+      success: true, data: {
+        intent: { title: '背着善宰跑', season: 1, queries: ['背着善宰跑'] },
+        ai_used: false,
+        candidates: [{ taskname: '资源A', shareurl: 'https://pan.quark.cn/s/aaa', score: 90 }],
+        baseline: { taskname: '背着善宰跑', savepath: '/0-影音/剧/背着善宰跑', pattern: '$TV_MAGIC', replace: '', match_reason: '剧名完全一致' }
+      }
+    }
+  };
+  ctx.aiSearch();
+  await tick();
+  check('调用 /ai/search', calls.some(c => c[1] === '/ai/search'));
+  check('按已有任务预填保存路径', ctx.aiForm.savepath === '/0-影音/剧/背着善宰跑', ctx.aiForm.savepath);
+  check('按已有任务预填命名规则', ctx.aiForm.pattern === '$TV_MAGIC', ctx.aiForm.pattern);
+
+  calls.length = 0;
+  global.__nextResponse = {
+    data: {
+      success: true, data: {
+        rows: [
+          { fid: 'f1', file_name: 'A.E01.mp4', dir: false, status: 'new', status_text: '可新增', new_name: '剧.S01E01.mp4', default_selected: true },
+          { fid: 'f2', file_name: 'A.E02.mp4', dir: false, status: 'dup_episode', status_text: '疑似重复', new_name: '剧.S01E02.mp4', default_selected: false },
+          { fid: 'f3', file_name: 'A.E03.mp4', dir: false, status: 'exists', status_text: '已在库', new_name: '剧.S01E03.mp4', default_selected: false }
+        ],
+        stats: { total: 3, new: 1, exists: 1, dup_episode: 1, unmatched: 0, folder: 0 },
+        savepath: '/x', savepath_exists: true, dir_note: '', dir_file_count: 3,
+        rule: { pattern: '$TV_MAGIC', replace: '', valid: true }, dir_files: []
+      }
+    }
+  };
+  ctx.aiSelectLink({ shareurl: 'https://pan.quark.cn/s/aaa', taskname: '背着善宰跑' });
+  await tick();
+  check('调用 /ai/analyze', calls.some(c => c[1] === '/ai/analyze'));
+  check('默认只勾选「可新增」',
+    ctx.aiAnalysis.rows[0].selected === true &&
+    ctx.aiAnalysis.rows[1].selected === false &&
+    ctx.aiAnalysis.rows[2].selected === false);
+  check('已选计数正确', ctx.aiSelectedCount() === 1);
+  check('「已在库」项不可选', ctx.aiSelectable(ctx.aiAnalysis.rows[2]) === false);
+
+  ctx.aiToggleAll({ target: { checked: true } });
+  check('全选只勾可选条目（跳过已在库）',
+    ctx.aiSelectedCount() === 2 && ctx.aiAnalysis.rows[2].selected === false, ctx.aiSelectedCount());
+
+  calls.length = 0;
+  ctx.aiAnalysis.rows[0].new_name = '手动改名.S01E01.mp4';
+  global.__nextResponse = { data: { success: true, data: { ok: true, log: '转存完成' } } };
+  ctx.aiCommit();
+  await tick();
+  const commitCall = calls.find(c => c[1] === '/ai/commit');
+  check('调用 /ai/commit 且提交选中条目', !!commitCall && commitCall[2].files.length === 2);
+  check('手动改的名字被带进请求体',
+    commitCall[2].files.some(x => x.new_name === '手动改名.S01E01.mp4'));
+  check('入库日志回显', ctx.aiCommitLog === '转存完成', ctx.aiCommitLog);
+
+  calls.length = 0;
+  ctx.formData.magic_regex = { '$TV_MAGIC': { pattern: '.*\\.(mp4)$', replace: '{TASKNAME}.{SXX}E{E}.{EXT}' } };
+  ctx.aiForm.pattern = '$TV_MAGIC';
+  global.__nextResponse = { data: { success: true, data: { rows: [], stats: {}, rule: { valid: true }, dir_files: [] } } };
+  ctx.aiApplyPreset();
+  await tick();
+  check('选预设带出替换模板', ctx.aiForm.replace === '{TASKNAME}.{SXX}E{E}.{EXT}', ctx.aiForm.replace);
+  check('选预设触发重新分析', calls.some(c => c[1] === '/ai/analyze'));
+}
+
+async function testFetchDataNormalize() {
+  console.log('【6】fetchData：AI 配置归一化与 Key 掩码');
+  global.__nextGet = {
+    data: {
+      success: true, data: {
+        cookie: [], tasklist: [], magic_regex: {}, source: {},
+        ai: { enable: true, base_url: 'https://api.deepseek.com/v1', model: 'deepseek-chat', api_key: '', api_key_set: true }
+      }
+    }
+  };
+  ctx.fetchData();
+  await tick();
+  check('布尔 true 归一化为字符串 "true"', ctx.formData.ai.enable === 'true', ctx.formData.ai.enable);
+  check('api_key 回传为空（已掩码）', ctx.formData.ai.api_key === '', ctx.formData.ai.api_key);
+  check('api_key_set 透传到前端', ctx.formData.ai.api_key_set === true);
+
+  global.__nextGet = { data: { success: true, data: { cookie: [], tasklist: [], magic_regex: {}, source: {}, ai: { enable: false } } } };
+  ctx.fetchData();
+  await tick();
+  check('布尔 false 归一化为 "false"', ctx.formData.ai.enable === 'false', ctx.formData.ai.enable);
+  check('缺字段补默认值', ctx.formData.ai.model === '' && ctx.formData.ai.base_url === '');
+}
+
+(async () => {
+  await testComponent();
+  testHandlers();
+  await testConfirmManualSelect();
+  testSelectAll();
+  await testAiFlow();
+  await testFetchDataNormalize();
+  console.log('\n结果: ' + passed + ' 通过, ' + failed + ' 失败');
+  process.exit(failed ? 1 : 0);
+})();
