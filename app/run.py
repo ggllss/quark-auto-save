@@ -413,6 +413,17 @@ def ai_test():
         return jsonify({"success": False, "message": f"AI 连接失败：{e}"})
 
 
+def _enabled_sources():
+    """当前已启用的搜索源名称列表"""
+    src = config_data.get("source", {}) or {}
+    names = []
+    for key, label in (("pansou", "PanSou"), ("cloudsaver", "CloudSaver")):
+        cfg = src.get(key) or {}
+        if str(cfg.get("enable", "true")).lower() == "true" and cfg.get("server"):
+            names.append(label)
+    return names
+
+
 @app.route("/ai/search", methods=["POST"])
 def ai_search():
     """剧名 → 意图解析 → 复用现有搜索 → AI 排序"""
@@ -425,17 +436,28 @@ def ai_search():
 
     client = _ai_client()
     intent = ai.parse_intent(keyword, client)
+    queries = [(q or "").lower() for q in (intent.get("queries") or [])[:3] if q]
 
-    pool, seen = [], set()
-    for query in (intent.get("queries") or [])[:3]:
-        try:
-            for item in _collect_suggestions(query.lower(), False):
-                url = item.get("shareurl") or ""
-                if url and url not in seen:
-                    seen.add(url)
-                    pool.append(item)
-        except Exception:
-            continue
+    def gather():
+        pool, seen = [], set()
+        for query in queries:
+            try:
+                for item in _collect_suggestions(query, False):
+                    url = item.get("shareurl") or ""
+                    if url and url not in seen:
+                        seen.add(url)
+                        pool.append(item)
+            except Exception:
+                continue
+        return pool
+
+    pool = gather()
+    retried = False
+    # 公共搜索源（如 PanSou）会偶发限流/超时，而 SDK 内部吞掉了异常只返回空列表，
+    # 表现为「搜不到」。空结果时补一次，尽量把偶发失败和真的没有资源区分开。
+    if not pool and queries:
+        retried = True
+        pool = gather()
 
     candidates = ai.rank_links(intent, pool[:60], client) if pool else []
 
@@ -450,6 +472,17 @@ def ai_search():
             "match_reason": reason,
         }
 
+    sources = _enabled_sources()
+    hint = ""
+    if not pool:
+        if not sources:
+            hint = "未启用任何搜索源，请到「系统配置 → 搜索源」中配置 PanSou 或 CloudSaver。"
+        else:
+            hint = (
+                "搜索源（%s）没有返回结果：可能是被限流或超时，也可能确实没有资源。"
+                "建议稍后重试，或换个更宽泛的关键词。" % "、".join(sources)
+            )
+
     return jsonify(
         {
             "success": True,
@@ -457,9 +490,12 @@ def ai_search():
                 "keyword": keyword,
                 "intent": intent,
                 "ai_used": intent.get("source") == "ai",
+                "sources": sources,
+                "retried": retried,
                 "pool_size": len(pool),
                 "candidates": candidates,
                 "baseline": baseline,
+                "hint": hint,
             },
         }
     )

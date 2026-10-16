@@ -547,6 +547,9 @@
                   AI 负责理解剧名、从候选链接里挑最匹配的；
                   <b>哪些集可更新由确定性比对得出</b>（分享文件 × 目标目录已有文件），不靠模型猜。
                 </small>
+                <small v-if="aiSearching" class="text-info d-block mt-2">
+                  <i class="bi bi-hourglass-split mr-1"></i>正在搜索…公共搜索源较慢时可能需要 1-2 分钟，请勿关闭页面。
+                </small>
                 <div v-if="aiStatus && aiStatus.ready === false" class="alert alert-warning mt-2 mb-0 py-2 small">
                   <i class="bi bi-exclamation-triangle mr-1"></i>
                   未配置 AI 接口，将使用本地规则运行（搜索与比对仍可用，仅少了智能解析与排序）。
@@ -1066,7 +1069,8 @@
               if (!res.success) { this.aiError = res.message || '搜索失败'; return; }
               this.aiResult = res.data;
               if (!res.data.candidates.length) {
-                this.aiError = '没有搜到候选链接。换个关键词，或在「系统配置 → 搜索源」检查 PanSou / CloudSaver 是否可用。';
+                // 后端会区分「没配搜索源」和「搜索源限流/超时」两种情况
+                this.aiError = res.data.hint || '没有搜到候选链接，请换个关键词再试。';
                 return;
               }
               const base = res.data.baseline;
