@@ -122,6 +122,17 @@ def test_ai_paths(mr, presets, files):
         "调用异常降级",
         ai.parse_intent("某某剧", StubClient(RuntimeError("网络断了")))["source"] == "local",
     )
+    # 模型常把数组字段返回成字符串，直接迭代会逐字符拆分
+    str_fields = ai.parse_intent(
+        "某某剧 第一季",
+        StubClient('{"title":"某某剧","season":1,"queries":"某某剧 第1季","aliases":"某剧"}'),
+    )
+    check(
+        "字符串 queries 不被逐字符拆分",
+        "某某剧 第1季" in str_fields["queries"] and len(str_fields["queries"]) <= 5,
+        str_fields["queries"],
+    )
+    check("字符串 aliases 归一为列表", str_fields["aliases"] == ["某剧"], str_fields["aliases"])
 
     print("【6】候选排序：AI 分支、缺失与越界处理")
     cands = [{"taskname": "资源A"}, {"taskname": "资源B"}, {"taskname": "资源C"}]

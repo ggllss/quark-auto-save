@@ -238,8 +238,17 @@ def _normalize_intent(raw, keyword):
     if not isinstance(season, int) or season <= 0:
         season = None
 
-    aliases = [str(a).strip() for a in (raw.get("aliases") or []) if str(a).strip()]
-    queries = [str(q).strip() for q in (raw.get("queries") or []) if str(q).strip()]
+    # 模型有时把数组字段返回成字符串（"queries": "剧名 第1季"），
+    # 直接迭代会逐字符拆分，这里先归一成列表
+    aliases_raw = raw.get("aliases") or []
+    if isinstance(aliases_raw, str):
+        aliases_raw = [aliases_raw]
+    queries_raw = raw.get("queries") or []
+    if isinstance(queries_raw, str):
+        queries_raw = [queries_raw]
+
+    aliases = [str(a).strip() for a in aliases_raw if str(a).strip()]
+    queries = [str(q).strip() for q in queries_raw if str(q).strip()]
 
     if not title:
         raise AIError("意图解析缺少 title")
