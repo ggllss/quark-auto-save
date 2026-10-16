@@ -923,6 +923,10 @@ class Quark:
         # 文件命名类
         mr = MagicRename(CONFIG_DATA.get("magic_regex", {}))
         mr.set_taskname(task["taskname"])
+        # 单文件重命名覆盖表 {原文件名: 目标文件名}
+        # AI 一次性转存会在界面上逐个展示并允许编辑推荐名，确认后据此覆盖规则计算结果；
+        # 值为空字符串表示保持原文件名不变。
+        rename_map = task.get("rename_map") or {}
 
         # 魔法正则转换
         pattern, replace = mr.magic_regex_conv(
@@ -950,8 +954,16 @@ class Quark:
                         share_file["file_name_re"] = share_file["file_name"]
                         need_save_list.append(share_file)
                     else:
-                        # 替换后的文件名
-                        file_name_re = mr.sub(pattern, replace, share_file["file_name"])
+                        # 替换后的文件名（单文件覆盖优先于规则计算）
+                        if share_file["file_name"] in rename_map:
+                            file_name_re = (
+                                rename_map[share_file["file_name"]]
+                                or share_file["file_name"]
+                            )
+                        else:
+                            file_name_re = mr.sub(
+                                pattern, replace, share_file["file_name"]
+                            )
                         # 判断替换后的文件名是否存在
                         if not mr.is_exists(
                             file_name_re,

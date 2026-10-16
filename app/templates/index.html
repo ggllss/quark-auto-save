@@ -42,6 +42,11 @@
                 <i class="bi bi-list-task"></i> 任务列表
               </a>
             </li>
+            <li class="nav-item">
+              <a class="nav-link" href="#" :class="{active: activeTab === 'ai'}" @click="changeTab('ai')">
+                <i class="bi bi-stars"></i> AI 追剧
+              </a>
+            </li>
             <h6 class="sidebar-heading px-3 mt-4 mb-1 text-muted">dashboard</h6>
             <li class="nav-item">
               <a class="nav-link" href="/logout">
@@ -273,6 +278,56 @@
               </div>
             </div>
 
+            <!-- ===== AI 设置 ===== -->
+            <div class="row title" title="AI 追剧所用的大模型接口，兼容 OpenAI 格式">
+              <div class="col">
+                <h2 style="display:inline-block;"><i class="bi bi-stars"></i> AI 设置</h2>
+                <span class="badge badge-pill" :class="aiStatus.ready ? 'badge-success' : 'badge-secondary'">
+                  {{ aiStatus.ready ? '已就绪' : '未启用' }}
+                </span>
+              </div>
+            </div>
+            <p class="small text-muted">
+              供「AI 追剧」使用：理解剧名、给候选链接排序、推荐命名规则。兼容 OpenAI 接口格式
+              （DeepSeek / 硅基流动 / 本地 Ollama 等均可）。留空也能用，只是降级为本地规则。
+            </p>
+            <div class="form-group row">
+              <label class="col-sm-2 col-form-label">启用</label>
+              <div class="col-sm-10 d-flex align-items-center">
+                <input type="checkbox" v-model="formData.ai.enable" true-value="true" false-value="false">
+                <small class="text-muted ml-2">勾选后生效</small>
+              </div>
+            </div>
+            <div class="form-group row">
+              <label class="col-sm-2 col-form-label">接口地址</label>
+              <div class="col-sm-10">
+                <input type="text" class="form-control" v-model="formData.ai.base_url" placeholder="如 https://api.deepseek.com/v1（本地 Ollama 可填 http://宿主机IP:11434/v1）">
+              </div>
+            </div>
+            <div class="form-group row">
+              <label class="col-sm-2 col-form-label">API Key</label>
+              <div class="col-sm-10">
+                <input type="password" class="form-control" v-model="formData.ai.api_key"
+                       :placeholder="formData.ai.api_key_set ? '已配置，留空则保持不变' : '本地 Ollama 可留空'">
+              </div>
+            </div>
+            <div class="form-group row">
+              <label class="col-sm-2 col-form-label">模型</label>
+              <div class="col-sm-10">
+                <div class="input-group">
+                  <input type="text" class="form-control" v-model="formData.ai.model" placeholder="如 deepseek-chat">
+                  <div class="input-group-append">
+                    <button class="btn btn-outline-info" type="button"
+                            :disabled="aiTesting || !formData.ai.base_url || !formData.ai.model"
+                            @click="aiTestConnection()">
+                      <i v-if="aiTesting" class="spinner-border spinner-border-sm mr-1"></i>测试连接
+                    </button>
+                  </div>
+                </div>
+                <small class="text-muted">测试用的是已保存的配置，改动后请先保存（Ctrl+S）再测试。</small>
+              </div>
+            </div>
+
           </div>
 
           <div v-if="activeTab === 'tasklist'">
@@ -466,6 +521,221 @@
             </div>
           </div>
 
+          <!-- ==================== AI 追剧 ==================== -->
+          <div v-if="activeTab === 'ai'">
+            <div class="row title">
+              <div class="col-12">
+                <h2><i class="bi bi-stars"></i> AI 追剧</h2>
+              </div>
+            </div>
+
+            <!-- 步骤1：输入剧名 -->
+            <div class="card mb-3">
+              <div class="card-body">
+                <div class="input-group">
+                  <input type="text" class="form-control" v-model="aiForm.keyword"
+                         @keydown.enter.prevent="aiSearch()"
+                         placeholder="输入要追更的剧集名称，例如：现在就出发 第四季">
+                  <div class="input-group-append">
+                    <button class="btn btn-primary" type="button" :disabled="aiSearching" @click="aiSearch()">
+                      <i v-if="aiSearching" class="spinner-border spinner-border-sm mr-1"></i>
+                      <i v-else class="bi bi-search-heart mr-1"></i>智能查找
+                    </button>
+                  </div>
+                </div>
+                <small class="text-muted d-block mt-2">
+                  AI 负责理解剧名、从候选链接里挑最匹配的；
+                  <b>哪些集可更新由确定性比对得出</b>（分享文件 × 目标目录已有文件），不靠模型猜。
+                </small>
+                <div v-if="aiStatus && aiStatus.ready === false" class="alert alert-warning mt-2 mb-0 py-2 small">
+                  <i class="bi bi-exclamation-triangle mr-1"></i>
+                  未配置 AI 接口，将使用本地规则运行（搜索与比对仍可用，仅少了智能解析与排序）。
+                  可在「系统配置 → AI 设置」中填写。
+                </div>
+              </div>
+            </div>
+
+            <div v-if="aiError" class="alert alert-danger py-2 small">{{ aiError }}</div>
+
+            <!-- 步骤2：意图解析 + 候选链接 -->
+            <div v-if="aiResult">
+              <div class="alert alert-light py-2 small">
+                <b>解析结果：</b>
+                剧名「{{ aiResult.intent.title }}」
+                <span v-if="aiResult.intent.season">· 第 {{ aiResult.intent.season }} 季</span>
+                · 检索词 {{ (aiResult.intent.queries || []).join(' / ') }}
+                <span class="badge" :class="aiResult.ai_used ? 'badge-info' : 'badge-secondary'">
+                  {{ aiResult.ai_used ? 'AI 解析' : '本地解析' }}
+                </span>
+                · 候选 {{ aiResult.candidates.length }} 条
+              </div>
+
+              <div v-if="aiResult.baseline" class="alert alert-success py-2 small">
+                <i class="bi bi-link-45deg mr-1"></i>
+                自动匹配到已有任务「{{ aiResult.baseline.taskname }}」（{{ aiResult.baseline.match_reason }}），
+                已用它的保存路径与命名规则作为默认值。
+              </div>
+
+              <table class="table table-sm table-hover">
+                <thead>
+                  <tr>
+                    <th style="width:64px">匹配度</th>
+                    <th>资源名称</th>
+                    <th style="width:120px">来源</th>
+                    <th style="width:150px">更新时间</th>
+                    <th style="width:100px">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(cand, ci) in aiResult.candidates" :key="ci">
+                    <td>
+                      <span class="badge" :class="cand.score >= 80 ? 'badge-success' : (cand.score >= 50 ? 'badge-warning' : 'badge-secondary')">
+                        {{ Math.round(cand.score) }}
+                      </span>
+                    </td>
+                    <td>
+                      <div>{{ cand.taskname }}</div>
+                      <small class="text-muted">{{ cand.reason }}</small>
+                    </td>
+                    <td><small>{{ cand.source }}<span v-if="cand.channel"> / {{ cand.channel }}</span></small></td>
+                    <td><small>{{ cand.datetime }}</small></td>
+                    <td>
+                      <button class="btn btn-sm btn-outline-primary" type="button" @click="aiSelectLink(cand)">
+                        分析此链接
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- 步骤3：分析结果 + 规则编辑 -->
+            <div v-if="aiAnalysis">
+              <hr>
+              <div class="form-row">
+                <div class="col-md-6">
+                  <div class="form-group row mb-2">
+                    <label class="col-sm-3 col-form-label">剧名</label>
+                    <div class="col-sm-9">
+                      <input type="text" class="form-control form-control-sm" v-model="aiForm.taskname">
+                    </div>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="form-group row mb-2">
+                    <label class="col-sm-3 col-form-label">入库目录</label>
+                    <div class="col-sm-9">
+                      <input type="text" class="form-control form-control-sm" v-model="aiForm.savepath">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card mb-2">
+                <div class="card-body py-2">
+                  <div class="form-row align-items-end">
+                    <div class="col-md-3">
+                      <label class="small mb-0">规则预设</label>
+                      <select class="form-control form-control-sm" v-model="aiForm.pattern" @change="aiApplyPreset()">
+                        <option v-for="(v, k) in formData.magic_regex" :key="k" :value="k">{{ k }}</option>
+                        <option value=".*">.*（全匹配，配合下方模板改名）</option>
+                      </select>
+                    </div>
+                    <div class="col-md-4">
+                      <label class="small mb-0">匹配正则</label>
+                      <input type="text" class="form-control form-control-sm" v-model="aiForm.pattern">
+                    </div>
+                    <div class="col-md-3">
+                      <label class="small mb-0">替换模板</label>
+                      <input type="text" class="form-control form-control-sm" v-model="aiForm.replace"
+                             :placeholder="aiRulePlaceholder()">
+                    </div>
+                    <div class="col-md-2">
+                      <button class="btn btn-sm btn-outline-secondary btn-block" type="button"
+                              :disabled="aiAnalyzing" @click="aiAnalyze()">应用规则</button>
+                    </div>
+                  </div>
+                  <div class="mt-2">
+                    <button class="btn btn-sm btn-outline-info" type="button"
+                            :disabled="aiAnalyzing" @click="aiAnalyze(true)">
+                      <i class="bi bi-magic mr-1"></i>推荐命名规则
+                    </button>
+                    <small class="text-muted ml-2">
+                      可用变量：{TASKNAME} {SXX} {S} {E} {I} {EXT} {PART} {DATE} {YEAR}
+                    </small>
+                  </div>
+                </div>
+              </div>
+
+              <div class="mb-2 small">
+                <span class="badge badge-success mr-1">可新增 {{ aiAnalysis.stats.new }}</span>
+                <span class="badge badge-secondary mr-1">已在库 {{ aiAnalysis.stats.exists }}</span>
+                <span class="badge badge-warning mr-1">疑似重复 {{ aiAnalysis.stats.dup_episode }}</span>
+                <span class="badge badge-light mr-1">不匹配规则 {{ aiAnalysis.stats.unmatched }}</span>
+                <span class="badge badge-info mr-1">文件夹 {{ aiAnalysis.stats.folder }}</span>
+                <span class="text-muted">目标目录已有 {{ aiAnalysis.dir_file_count }} 个文件</span>
+              </div>
+              <div v-if="aiAnalysis.dir_note" class="alert alert-warning py-2 small">{{ aiAnalysis.dir_note }}</div>
+              <div v-if="!aiAnalysis.rule.valid" class="alert alert-danger py-2 small">
+                正则表达式无效，请检查「匹配正则」
+              </div>
+              <div v-if="aiAnalysis.rule_suggestion && aiAnalysis.rule_suggestion.reason"
+                   class="alert alert-info py-2 small">
+                <b>规则建议（{{ aiAnalysis.rule_suggestion.source === 'ai' ? 'AI' : '本地打分' }}）：</b>
+                {{ aiAnalysis.rule_suggestion.reason }} ——
+                <code>{{ aiAnalysis.rule_suggestion.replace }}</code>
+                <button class="btn btn-sm btn-link py-0" type="button" @click="aiAdoptSuggestion()">采纳并重新分析</button>
+              </div>
+
+              <table class="table table-sm table-hover">
+                <thead>
+                  <tr>
+                    <th style="width:36px">
+                      <input type="checkbox" :checked="aiAllSelected()" @change="aiToggleAll($event)">
+                    </th>
+                    <th style="width:170px">状态</th>
+                    <th>原文件名</th>
+                    <th style="width:34%">重命名后（可手动编辑）</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(row, ri) in aiAnalysis.rows" :key="ri"
+                      :class="{'table-success': row.status === 'new', 'table-warning': row.status === 'dup_episode'}">
+                    <td>
+                      <input type="checkbox" v-model="row.selected"
+                             :disabled="row.status === 'exists' || row.status === 'rule_error'">
+                    </td>
+                    <td><small>{{ row.status_text }}</small></td>
+                    <td><small :title="row.file_name">{{ row.file_name }}</small></td>
+                    <td>
+                      <input type="text" class="form-control form-control-sm" v-model="row.new_name"
+                             :disabled="row.dir"
+                             :title="row.dir ? '文件夹整体转存，不重命名' : '可直接改成你想要的文件名'">
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <div class="mb-2">
+                <b>已选 {{ aiSelectedCount() }} 项</b>
+                <button class="btn btn-success ml-2" type="button"
+                        :disabled="aiCommitting || aiSelectedCount() === 0" @click="aiCommit()">
+                  <i v-if="aiCommitting" class="spinner-border spinner-border-sm mr-1"></i>
+                  <i v-else class="bi bi-box-arrow-in-down mr-1"></i>确认入库
+                </button>
+                <button class="btn btn-outline-secondary ml-2" type="button" @click="aiReset()">清空重来</button>
+                <small class="text-muted ml-2">按上表文件名重命名后转存（一次性，不创建任务）</small>
+              </div>
+
+              <div v-if="aiCommitLog" class="card mb-3">
+                <div class="card-header py-1"><b>入库结果</b></div>
+                <div class="card-body py-2">
+                  <pre class="small mb-0" style="max-height:320px;overflow:auto;">{{ aiCommitLog }}</pre>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="bottom-buttons">
             <button class="btn btn-success" data-toggle="tooltip" data-placement="top" title="保存 CTRL+S"><i class="bi bi-floppy2-fill"></i></button>
             <button type="button" class="btn btn-primary" data-toggle="tooltip" data-placement="top" title="运行 CTRL+R" @click="runScriptNow()"><i class="bi bi-play-fill"></i></button>
@@ -650,6 +920,13 @@
           media_servers: {},
           tasklist: [],
           magic_regex: {},
+          ai: {
+            enable: "false",
+            base_url: "",
+            api_key: "",
+            model: "",
+            timeout: 60
+          },
           source: {
             net: {
               enable: ""
@@ -694,6 +971,24 @@
         },
         activeTab: 'tasklist',
         configModified: false,
+        // ===== AI 追剧 =====
+        aiForm: {
+          keyword: "",
+          shareurl: "",
+          taskname: "",
+          savepath: "/",
+          pattern: "$TV_MAGIC",
+          replace: ""
+        },
+        aiSearching: false,
+        aiAnalyzing: false,
+        aiCommitting: false,
+        aiTesting: false,
+        aiResult: null,
+        aiAnalysis: null,
+        aiCommitLog: "",
+        aiError: "",
+        aiStatus: {},
         fileSelect: {
           index: null,
           share: {},
@@ -737,6 +1032,7 @@
       mounted() {
         this.fetchData();
         this.checkNewVersion();
+        this.aiFetchStatus();
         $('[data-toggle="tooltip"]').tooltip();
         document.addEventListener('keydown', this.handleKeyDown);
         document.addEventListener('click', (e) => {
@@ -750,6 +1046,152 @@
         window.removeEventListener('beforeunload', this.handleBeforeUnload);
       },
       methods: {
+        // ==================== AI 追剧 ====================
+        aiFetchStatus() {
+          axios.get('/ai/status').then(response => {
+            if (response.data.success) this.aiStatus = response.data.data;
+          }).catch(() => { });
+        },
+        aiSearch() {
+          const keyword = (this.aiForm.keyword || '').trim();
+          if (!keyword) { this.showToast('请输入剧集名称', 'warning'); return; }
+          this.aiSearching = true;
+          this.aiError = '';
+          this.aiResult = null;
+          this.aiAnalysis = null;
+          this.aiCommitLog = '';
+          axios.post('/ai/search', { keyword: keyword })
+            .then(response => {
+              const res = response.data;
+              if (!res.success) { this.aiError = res.message || '搜索失败'; return; }
+              this.aiResult = res.data;
+              if (!res.data.candidates.length) {
+                this.aiError = '没有搜到候选链接。换个关键词，或在「系统配置 → 搜索源」检查 PanSou / CloudSaver 是否可用。';
+                return;
+              }
+              const base = res.data.baseline;
+              if (base) {
+                this.aiForm.taskname = base.taskname || res.data.intent.title;
+                this.aiForm.savepath = base.savepath || '/';
+                if (base.pattern) this.aiForm.pattern = base.pattern;
+                if (base.replace !== undefined) this.aiForm.replace = base.replace;
+              } else {
+                this.aiForm.taskname = res.data.intent.title || keyword;
+              }
+            })
+            .catch(error => { this.aiError = '搜索请求失败：' + error; })
+            .finally(() => { this.aiSearching = false; });
+        },
+        aiSelectLink(cand) {
+          this.aiForm.shareurl = cand.shareurl;
+          if (!this.aiForm.taskname) this.aiForm.taskname = cand.taskname || this.aiForm.keyword;
+          this.aiAnalyze();
+        },
+        aiAnalyze(suggestRule = false) {
+          if (!this.aiForm.shareurl) { this.showToast('请先选择一个候选链接', 'warning'); return; }
+          this.aiAnalyzing = true;
+          this.aiError = '';
+          axios.post('/ai/analyze', {
+            shareurl: this.aiForm.shareurl,
+            savepath: this.aiForm.savepath,
+            taskname: this.aiForm.taskname,
+            pattern: this.aiForm.pattern,
+            replace: this.aiForm.replace,
+            suggest_rule: !!suggestRule
+          })
+            .then(response => {
+              const res = response.data;
+              if (!res.success) { this.aiError = res.message || '分析失败'; return; }
+              const data = res.data;
+              data.rows.forEach(row => { row.selected = !!row.default_selected; });
+              this.aiAnalysis = data;
+              if (suggestRule && data.rule_suggestion && !data.rule_suggestion.error) {
+                const sug = data.rule_suggestion;
+                if (sug.pattern) this.aiForm.pattern = sug.pattern;
+                if (sug.replace !== undefined) this.aiForm.replace = sug.replace;
+                this.showToast('已采纳推荐规则', 'success');
+              }
+            })
+            .catch(error => { this.aiError = '分析请求失败：' + error; })
+            .finally(() => { this.aiAnalyzing = false; });
+        },
+        aiApplyPreset() {
+          const preset = (this.formData.magic_regex || {})[this.aiForm.pattern];
+          if (preset) this.aiForm.replace = preset.replace;
+          this.aiAnalyze();
+        },
+        aiAdoptSuggestion() {
+          const sug = this.aiAnalysis && this.aiAnalysis.rule_suggestion;
+          if (!sug) return;
+          if (sug.pattern) this.aiForm.pattern = sug.pattern;
+          if (sug.replace !== undefined) this.aiForm.replace = sug.replace;
+          this.aiAnalyze();
+        },
+        aiRulePlaceholder() {
+          const preset = (this.formData.magic_regex || {})[this.aiForm.pattern];
+          return preset ? preset.replace : '留空则沿用预设规则的替换模板';
+        },
+        aiSelectable(row) {
+          return row.status !== 'exists' && row.status !== 'rule_error';
+        },
+        aiAllSelected() {
+          if (!this.aiAnalysis) return false;
+          const list = this.aiAnalysis.rows.filter(this.aiSelectable);
+          return list.length > 0 && list.every(row => row.selected);
+        },
+        aiToggleAll(event) {
+          if (!this.aiAnalysis) return;
+          const checked = event.target.checked;
+          this.aiAnalysis.rows.forEach(row => {
+            if (this.aiSelectable(row)) row.selected = checked;
+          });
+        },
+        aiSelectedCount() {
+          if (!this.aiAnalysis) return 0;
+          return this.aiAnalysis.rows.filter(row => row.selected).length;
+        },
+        aiCommit() {
+          const rows = (this.aiAnalysis.rows || []).filter(row => row.selected);
+          if (!rows.length) { this.showToast('请先勾选要入库的条目', 'warning'); return; }
+          this.aiCommitting = true;
+          this.aiCommitLog = '';
+          this.aiError = '';
+          axios.post('/ai/commit', {
+            shareurl: this.aiForm.shareurl,
+            savepath: this.aiForm.savepath,
+            taskname: this.aiForm.taskname,
+            files: rows.map(row => ({
+              fid: row.fid,
+              file_name: row.file_name,
+              new_name: row.new_name
+            }))
+          })
+            .then(response => {
+              const res = response.data;
+              if (!res.success) { this.aiError = res.message || '入库失败'; return; }
+              this.aiCommitLog = res.data.log || '(无输出)';
+              this.showToast(res.data.ok ? '入库完成' : '入库结束，请看日志', res.data.ok ? 'success' : 'warning');
+              this.aiAnalyze();
+            })
+            .catch(error => { this.aiError = '入库请求失败：' + error; })
+            .finally(() => { this.aiCommitting = false; });
+        },
+        aiReset() {
+          this.aiResult = null;
+          this.aiAnalysis = null;
+          this.aiCommitLog = '';
+          this.aiError = '';
+          this.aiForm.shareurl = '';
+        },
+        aiTestConnection() {
+          this.aiTesting = true;
+          axios.post('/ai/test', {})
+            .then(response => {
+              this.showToast(response.data.message, response.data.success ? 'success' : 'error');
+            })
+            .catch(error => { this.showToast('测试失败：' + error, 'error'); })
+            .finally(() => { this.aiTesting = false; });
+        },
         changeTab(tab) {
           this.activeTab = tab;
           if (window.innerWidth <= 768) {
@@ -813,6 +1255,14 @@
                   enable: ""
                 };
               }
+              // 确保 AI 配置存在（老配置没有 ai 段）
+              config_data.ai = Object.assign({
+                enable: "false",
+                base_url: "",
+                api_key: "",
+                model: "",
+                timeout: 60
+              }, config_data.ai || {});
               this.formData = config_data;
               setTimeout(() => {
                 this.configModified = false;

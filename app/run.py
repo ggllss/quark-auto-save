@@ -18,6 +18,7 @@ from apscheduler.triggers.cron import CronTrigger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sdk.cloudsaver import CloudSaver
 from sdk.pansou import PanSou
+import ai
 from datetime import timedelta
 import subprocess
 import requests
@@ -178,6 +179,11 @@ def get_data():
         return jsonify({"success": False, "message": "未登录"})
     data = Config.read_json(CONFIG_PATH)
     del data["webui"]
+    # AI 的 API Key 不回传给前端，只告知是否已配置
+    ai_cfg = data.get("ai")
+    if isinstance(ai_cfg, dict):
+        ai_cfg["api_key_set"] = bool(ai_cfg.get("api_key"))
+        ai_cfg["api_key"] = ""
     data["api_token"] = get_login_token()
     data["task_plugins_config_default"] = task_plugins_config_default
     return jsonify({"success": True, "data": data})
@@ -191,9 +197,17 @@ def update():
         return jsonify({"success": False, "message": "未登录"})
     # 使用允许列表防止批量赋值攻击
     allowed_keys = ["cookie", "crontab", "push_config", "tasklist",
-                    "magic_regex", "plugins", "source"]
+                    "magic_regex", "plugins", "source", "ai"]
     for key, value in request.json.items():
-        if key in allowed_keys:
+        if key not in allowed_keys:
+            continue
+        if key == "ai" and isinstance(value, dict):
+            # api_key 留空表示「不修改」，避免前端拿到掩码后把真 Key 覆盖掉
+            incoming = {k: v for k, v in value.items() if k != "api_key_set"}
+            if not (incoming.get("api_key") or "").strip():
+                incoming["api_key"] = (config_data.get("ai") or {}).get("api_key", "")
+            config_data["ai"] = incoming
+        else:
             config_data.update({key: value})
     Config.write_json(CONFIG_PATH, config_data)
     # 重新加载任务
@@ -255,12 +269,11 @@ def run_script_now():
     )
 
 
-@app.route("/task_suggestions")
-def get_task_suggestions():
-    if not is_login():
-        return jsonify({"success": False, "message": "未登录"})
-    query = request.args.get("q", "").lower()
-    deep = request.args.get("d", "").lower()
+def _collect_suggestions(query, deep=False):
+    """聚合 PanSou + CloudSaver 的搜索结果，按时间倒序去重。
+
+    普通搜索与 AI 搜索共用同一份实现，避免两处逻辑漂移。
+    """
     cs_data = config_data.get("source", {}).get("cloudsaver", {})
     ps_data = config_data.get("source", {}).get("pansou", {})
 
@@ -281,41 +294,487 @@ def get_task_suggestions():
                 if search.get("new_token"):
                     cs_data["token"] = search.get("new_token")
                     Config.write_json(CONFIG_PATH, config_data)
-                search_results = cs.clean_search_results(search.get("data"))
-                return search_results
+                return cs.clean_search_results(search.get("data")) or []
         return []
 
     def ps_search():
         if ps_data.get("server"):
-            ps = PanSou(ps_data.get("server"))
-            return ps.search(query, deep == "1")
+            return PanSou(ps_data.get("server")).search(query, deep) or []
         return []
 
+    search_results = []
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = []
+        if str(cs_data.get("enable", "true")).lower() == "true":
+            futures.append(executor.submit(cs_search))
+        if str(ps_data.get("enable", "true")).lower() == "true":
+            futures.append(executor.submit(ps_search))
+        for future in as_completed(futures):
+            search_results.extend(future.result() or [])
+
+    # 按时间排序并去重
+    search_results.sort(key=lambda x: x.get("datetime", ""), reverse=True)
+    results = []
+    link_array = []
+    for item in search_results:
+        url = item.get("shareurl", "")
+        if url != "" and url not in link_array:
+            link_array.append(url)
+            results.append(item)
+    return results
+
+
+@app.route("/task_suggestions")
+def get_task_suggestions():
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    query = request.args.get("q", "").lower()
+    deep = request.args.get("d", "").lower() == "1"
     try:
-        search_results = []
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            features = []
-            if str(cs_data.get("enable", "true")).lower() == "true":
-                features.append(executor.submit(cs_search))
-            if str(ps_data.get("enable", "true")).lower() == "true":
-                features.append(executor.submit(ps_search))
-            for future in as_completed(features):
-                result = future.result()
-                search_results.extend(result)
-
-        # 按时间排序并去重
-        results = []
-        link_array = []
-        search_results.sort(key=lambda x: x.get("datetime", ""), reverse=True)
-        for item in search_results:
-            url = item.get("shareurl", "")
-            if url != "" and url not in link_array:
-                link_array.append(url)
-                results.append(item)
-
-        return jsonify({"success": True, "data": results})
+        return jsonify({"success": True, "data": _collect_suggestions(query, deep)})
     except Exception as e:
         return jsonify({"success": True, "message": f"error: {str(e)}"})
+
+
+# ======================================================================
+# AI 追剧
+# 分工：模型只做「不确定」的语义判断（意图解析 / 候选排序 / 命名建议）；
+#       「哪些集可更新」是确定性比对（MagicRename + 目标目录已有文件），
+#       不交给模型，避免幻觉造成漏转或误判。
+# ======================================================================
+
+
+def _ai_client():
+    return ai.AIClient(config_data.get("ai", {}))
+
+
+def _require_cookie():
+    """取出第一个账号，没有则返回 None"""
+    cookie_list = config_data.get("cookie") or []
+    if not cookie_list or not (cookie_list[0] or "").strip():
+        return None
+    return Quark(cookie_list[0])
+
+
+def _match_task_by_title(title):
+    """按剧名匹配已有任务，作为保存路径与命名规则的默认基准"""
+    if not title:
+        return None, ""
+    title = title.strip()
+    fuzzy = None
+    for task in config_data.get("tasklist", []) or []:
+        name = (task.get("taskname") or "").strip()
+        if not name:
+            continue
+        if name == title:
+            return task, "剧名完全一致"
+        if fuzzy is None and (title in name or name in title):
+            fuzzy = task
+    if fuzzy is not None:
+        return fuzzy, "剧名包含匹配"
+    return None, ""
+
+
+@app.route("/ai/status")
+def ai_status():
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    client = _ai_client()
+    return jsonify(
+        {
+            "success": True,
+            "data": {
+                "enable": client.enable,
+                "ready": client.ready,
+                "base_url": client.base_url,
+                "model": client.model,
+                "has_key": bool(client.api_key),
+            },
+        }
+    )
+
+
+@app.route("/ai/test", methods=["POST"])
+def ai_test():
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    try:
+        reply = _ai_client().chat(
+            "你是连通性测试助手。", '只回复 JSON：{"ok": true}', temperature=0
+        )
+        return jsonify(
+            {
+                "success": True,
+                "message": "AI 连接成功",
+                "data": {"reply": reply[:200]},
+            }
+        )
+    except Exception as e:
+        return jsonify({"success": False, "message": f"AI 连接失败：{e}"})
+
+
+@app.route("/ai/search", methods=["POST"])
+def ai_search():
+    """剧名 → 意图解析 → 复用现有搜索 → AI 排序"""
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    body = request.json or {}
+    keyword = (body.get("keyword") or "").strip()
+    if not keyword:
+        return jsonify({"success": False, "message": "请输入剧集名称"})
+
+    client = _ai_client()
+    intent = ai.parse_intent(keyword, client)
+
+    pool, seen = [], set()
+    for query in (intent.get("queries") or [])[:3]:
+        try:
+            for item in _collect_suggestions(query.lower(), False):
+                url = item.get("shareurl") or ""
+                if url and url not in seen:
+                    seen.add(url)
+                    pool.append(item)
+        except Exception:
+            continue
+
+    candidates = ai.rank_links(intent, pool[:60], client) if pool else []
+
+    task, reason = _match_task_by_title(intent.get("title") or "")
+    baseline = None
+    if task:
+        baseline = {
+            "taskname": task.get("taskname"),
+            "savepath": task.get("savepath") or "/",
+            "pattern": task.get("pattern") or "",
+            "replace": task.get("replace") or "",
+            "match_reason": reason,
+        }
+
+    return jsonify(
+        {
+            "success": True,
+            "data": {
+                "keyword": keyword,
+                "intent": intent,
+                "ai_used": intent.get("source") == "ai",
+                "pool_size": len(pool),
+                "candidates": candidates,
+                "baseline": baseline,
+            },
+        }
+    )
+
+
+def _extract_se(name, mr):
+    """从文件名里提取 (季, 集)。提取不到返回 None。
+
+    复用 MagicRename 的 {S}/{E} 变量正则，保证与改名引擎口径一致。
+    """
+    season = episode = None
+    for pattern in mr.magic_variable.get("{S}", []):
+        m = re.search(pattern, name)
+        if m:
+            try:
+                season = int(m.group())
+            except ValueError:
+                season = None
+            break
+    for pattern in mr.magic_variable.get("{E}", []):
+        m = re.search(pattern, name)
+        if m:
+            try:
+                episode = int(m.group())
+            except ValueError:
+                episode = None
+            break
+    return season, episode
+
+
+def _episode_conflict(new_name, mr, dir_se):
+    """集号交叉比对：库里已有同一集（哪怕文件名不同）时返回冲突描述。
+
+    这是「追更」场景的关键判定——仅比较完整文件名会漏掉
+    「库里叫 E09.mp4、新算出来叫 剧名.S01E09.mp4」这类实际重复。
+    """
+    season, episode = _extract_se(new_name, mr)
+    if episode is None:
+        return None
+    for dir_season, dir_episode in dir_se:
+        if dir_episode != episode:
+            continue
+        # 任一侧缺季号时只比集号，避免因季号缺失漏判
+        if season is None or dir_season is None or season == dir_season:
+            return f"S{dir_season:02d}E{dir_episode:02d}" if dir_season else f"E{dir_episode:02d}"
+    return None
+
+
+@app.route("/ai/analyze", methods=["POST"])
+def ai_analyze():
+    """
+    确定性分析：分享内文件 × 目标目录已有文件 → 新增 / 已在库 / 不匹配规则。
+    判定口径与 quark_auto_save.dir_check_and_save 保持一致（三道闸门）。
+    """
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    body = request.json or {}
+    shareurl = (body.get("shareurl") or "").strip()
+    savepath = (body.get("savepath") or "/").strip() or "/"
+    taskname = (body.get("taskname") or "").strip() or "未命名"
+    pattern = body.get("pattern") or ""
+    replace = body.get("replace") or ""
+    want_rule = bool(body.get("suggest_rule"))
+
+    if not shareurl:
+        return jsonify({"success": False, "message": "缺少分享链接"})
+    account = _require_cookie()
+    if account is None:
+        return jsonify({"success": False, "message": "请先在系统配置里填写 Cookie"})
+
+    # ① 解析分享
+    try:
+        pwd_id, passcode, pdir_fid, _ = account.extract_url(shareurl)
+        stoken_ret = account.get_stoken(pwd_id, passcode)
+        if stoken_ret.get("status") != 200:
+            return jsonify(
+                {
+                    "success": False,
+                    "message": stoken_ret.get("message") or "分享链接无效或已失效",
+                }
+            )
+        stoken = stoken_ret["data"]["stoken"]
+        detail = account.get_detail(
+            pwd_id, stoken, pdir_fid, _fetch_share=1, fetch_share_full_path=1
+        )
+        if detail.get("code") != 0:
+            return jsonify(
+                {"success": False, "message": detail.get("message") or "获取分享内容失败"}
+            )
+        share_list = detail["data"].get("list") or []
+        if not share_list:
+            return jsonify({"success": False, "message": "分享为空，文件可能已被删除"})
+        # 与转存引擎一致：只有一个文件夹时自动深入一层
+        if len(share_list) == 1 and share_list[0].get("dir"):
+            inner = account.get_detail(pwd_id, stoken, share_list[0]["fid"])
+            if inner.get("code") == 0 and inner["data"].get("list"):
+                share_list = inner["data"]["list"]
+    except Exception as e:
+        return jsonify({"success": False, "message": f"解析分享失败：{e}"})
+
+    # ② 目标目录已有文件
+    dir_names = []
+    savepath_exists = False
+    dir_note = ""
+    savepath_norm = re.sub(r"/{2,}", "/", f"/{savepath}")
+    try:
+        fids = account.get_fids([savepath_norm])
+        if fids:
+            savepath_exists = True
+            ls_ret = account.ls_dir(fids[0]["fid"])
+            dir_names = [
+                f["file_name"] for f in (ls_ret.get("data", {}).get("list") or [])
+            ]
+        else:
+            dir_note = f"目标目录尚不存在：{savepath_norm}（入库时会自动创建）"
+    except Exception as e:
+        dir_note = f"读取目标目录失败：{e}"
+
+    # ③ 逐文件判定
+    mr = MagicRename(config_data.get("magic_regex", {}))
+    mr.set_taskname(taskname)
+    rule_pattern, rule_replace = mr.magic_regex_conv(pattern, replace)
+    rule_ok = True
+    if rule_pattern:
+        try:
+            re.compile(rule_pattern)
+        except re.error:
+            rule_ok = False
+
+    # 库里已有文件的季集索引，用于识别「同一集但文件名不同」的重复
+    dir_se = []
+    for _name in dir_names:
+        _s, _e = _extract_se(_name, mr)
+        if _e is not None:
+            dir_se.append((_s, _e))
+
+    rows = []
+    for f in share_list:
+        name = f.get("file_name") or ""
+        is_dir = bool(f.get("dir"))
+        row = {
+            "fid": f.get("fid"),
+            "file_name": name,
+            "dir": is_dir,
+            "size": f.get("size"),
+            "updated_at": f.get("updated_at"),
+            "include_items": f.get("include_items"),
+            "new_name": name,
+        }
+        if is_dir:
+            exists = name in dir_names
+            row.update(
+                {
+                    "status": "folder",
+                    "status_text": "文件夹（整体转存）",
+                    "in_rule": True,
+                    "exists": exists,
+                    "default_selected": not exists,
+                }
+            )
+        else:
+            in_rule = (
+                bool(re.search(rule_pattern, name))
+                if (rule_pattern and rule_ok)
+                else True
+            )
+            exists_orig = bool(mr.is_exists(name, dir_names))
+            new_name = mr.sub(rule_pattern, rule_replace, name) if rule_ok else name
+            exists_new = bool(mr.is_exists(new_name, dir_names))
+            row["new_name"] = new_name or name
+            row["in_rule"] = in_rule
+            row["exists"] = exists_orig or exists_new
+            if not rule_ok:
+                row.update({"status": "rule_error", "status_text": "规则无效"})
+            elif exists_orig:
+                row.update({"status": "exists", "status_text": "已在库（同名）"})
+            elif exists_new:
+                row.update({"status": "exists", "status_text": "已在库（改名后同名）"})
+            elif not in_rule:
+                row.update({"status": "unmatched", "status_text": "不匹配规则"})
+            else:
+                conflict = _episode_conflict(row["new_name"], mr, dir_se)
+                if conflict:
+                    row.update(
+                        {
+                            "status": "dup_episode",
+                            "status_text": f"疑似重复（库里已有 {conflict}）",
+                            "conflict": conflict,
+                        }
+                    )
+                else:
+                    row.update({"status": "new", "status_text": "可新增"})
+            row["default_selected"] = row["status"] == "new"
+        rows.append(row)
+
+    stats = {
+        "total": len(rows),
+        "new": sum(1 for r in rows if r["status"] == "new"),
+        "exists": sum(1 for r in rows if r["status"] == "exists"),
+        "dup_episode": sum(1 for r in rows if r["status"] == "dup_episode"),
+        "unmatched": sum(1 for r in rows if r["status"] == "unmatched"),
+        "folder": sum(1 for r in rows if r["status"] == "folder"),
+    }
+
+    data = {
+        "rows": rows,
+        "stats": stats,
+        "savepath": savepath_norm,
+        "savepath_exists": savepath_exists,
+        "dir_note": dir_note,
+        "dir_file_count": len(dir_names),
+        "dir_files": dir_names[:100],
+        "rule": {
+            "pattern": pattern,
+            "replace": replace,
+            "resolved_pattern": rule_pattern,
+            "resolved_replace": rule_replace,
+            "valid": rule_ok,
+        },
+    }
+
+    # ④ 可选：推荐命名规则
+    if want_rule:
+        try:
+            filenames = [r["file_name"] for r in rows if not r["dir"]]
+            data["rule_suggestion"] = ai.suggest_rename_rule(
+                taskname,
+                filenames,
+                config_data.get("magic_regex", {}),
+                mr.sub,
+                _ai_client(),
+            )
+        except Exception as e:
+            data["rule_suggestion"] = {"error": str(e)}
+
+    return jsonify({"success": True, "data": data})
+
+
+@app.route("/ai/commit", methods=["POST"])
+def ai_commit():
+    """
+    一次性转存：按界面确认的最终文件名重命名入库。
+
+    不创建任务；直接调用 do_save_task，因此不经过 do_save，
+    天然绕过 runweek 周期限制（is_time 只在 do_save 中调用）。
+    """
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    body = request.json or {}
+    shareurl = (body.get("shareurl") or "").strip()
+    savepath = (body.get("savepath") or "/").strip() or "/"
+    taskname = (body.get("taskname") or "").strip() or "AI 追剧"
+    files = body.get("files") or []
+
+    if not shareurl:
+        return jsonify({"success": False, "message": "缺少分享链接"})
+    if not files:
+        return jsonify({"success": False, "message": "没有勾选任何文件"})
+    account = _require_cookie()
+    if account is None:
+        return jsonify({"success": False, "message": "请先在系统配置里填写 Cookie"})
+
+    fid_list = [f.get("fid") for f in files if f.get("fid")]
+    if not fid_list:
+        return jsonify({"success": False, "message": "勾选的条目缺少 fid"})
+
+    # 最终文件名映射：值为空字符串表示保持原文件名
+    rename_map = {}
+    for f in files:
+        orig = f.get("file_name") or ""
+        if orig:
+            rename_map[orig] = (f.get("new_name") or "").strip()
+
+    savepath_norm = re.sub(r"/{2,}", "/", f"/{savepath}")
+    # 目标目录不存在则创建（新剧入库场景）
+    try:
+        if not account.get_fids([savepath_norm]):
+            account.mkdir(savepath_norm)
+    except Exception:
+        pass
+
+    task = {
+        "taskname": taskname,
+        "shareurl": shareurl,
+        "savepath": savepath_norm,
+        # 成员资格由用户勾选（fid_list）决定；pattern 放开为全匹配，
+        # 文件名一律由 rename_map 给出，避免规则再次筛掉用户选中的文件
+        "pattern": ".*",
+        "replace": "",
+        "fid_list": fid_list,
+        "rename_map": rename_map,
+    }
+
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            tree = account.do_save_task(task)
+        ok = bool(tree)
+    except Exception as e:
+        buf.write(f"\n转存异常：{e}\n{traceback.format_exc()}")
+        ok = False
+
+    return jsonify(
+        {
+            "success": True,
+            "data": {
+                "ok": ok,
+                "renamed": len(rename_map),
+                "log": buf.getvalue().strip()[-4000:],
+            },
+        }
+    )
 
 
 @app.route("/get_share_detail", methods=["POST"])
