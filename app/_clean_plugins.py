@@ -12,6 +12,12 @@ def clean_plugins():
     sys_ext = "pyd" if system == "Windows" else "so"
 
     for f in os.listdir(PLUGINS_DIR):
+        # 只处理文件，跳过子目录（例如运行期产生的 __pycache__），
+        # 否则 os.remove 会因目标为目录而报错并中断构建
+        if not os.path.isfile(os.path.join(PLUGINS_DIR, f)):
+            print(f"Skipping directory: {f}")
+            continue
+
         if f.endswith(f".{sys_ext}"):
             if f".{arch}" in f:
                 new_f = f.replace(f".{arch}", "")

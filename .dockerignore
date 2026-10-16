@@ -1,5 +1,7 @@
 .git
 .github
 __pycache__
+**/__pycache__
 *.tar
+**/*.tar
 /img
