@@ -637,6 +637,26 @@ def test_plugin_per_dir():
     check("未启用的插件不触发", idle.calls == [], idle.calls)
 
 
+def test_multi_source():
+    print("【18】多搜索源：PanSou 多实例解析")
+    import run
+
+    check("逗号分隔解析成多个实例",
+          run._pansou_servers({"server": "https://a.com, https://b.com/"})
+          == ["https://a.com", "https://b.com"],
+          run._pansou_servers({"server": "https://a.com, https://b.com/"}))
+    check("servers 数组写法",
+          run._pansou_servers({"servers": ["https://x", "https://y"]}) == ["https://x", "https://y"])
+    check("换行分隔写法",
+          run._pansou_servers({"server": "https://a\nhttps://b"}) == ["https://a", "https://b"])
+    check("去重保序",
+          run._pansou_servers({"server": "https://a, https://a"}) == ["https://a"])
+    check("最多取 3 个（避免请求爆炸）",
+          len(run._pansou_servers({"server": "a,b,c,d,e"})) == 3,
+          run._pansou_servers({"server": "a,b,c,d,e"}))
+    check("空配置返回空列表", run._pansou_servers({}) == [])
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -667,6 +687,7 @@ def main():
     test_extra_routing()
     test_tmdb_specials()
     test_plugin_per_dir()
+    test_multi_source()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0

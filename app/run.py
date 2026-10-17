@@ -273,6 +273,29 @@ def run_script_now():
     )
 
 
+def _pansou_servers(ps_data):
+    """
+    解析 PanSou 实例列表，支持三种写法：
+      server: "https://a, https://b"      逗号/空格/分号分隔
+      server: 换行分隔的多行
+      servers: ["https://a", "https://b"]
+    最多取 3 个，避免请求量爆炸。
+    """
+    raw = ps_data.get("servers")
+    items = []
+    if isinstance(raw, list):
+        items.extend(str(x) for x in raw)
+    text = ps_data.get("server")
+    if isinstance(text, str):
+        items.extend(re.split(r"[\s,;]+", text))
+    out = []
+    for item in items:
+        item = (item or "").strip().rstrip("/")
+        if item and item not in out:
+            out.append(item)
+    return out[:3]
+
+
 def _collect_suggestions(query, deep=False):
     """聚合 PanSou + CloudSaver 的搜索结果，按时间倒序去重。
 
@@ -301,18 +324,25 @@ def _collect_suggestions(query, deep=False):
                 return cs.clean_search_results(search.get("data")) or []
         return []
 
-    def ps_search():
-        if ps_data.get("server"):
-            return PanSou(ps_data.get("server")).search(query, deep) or []
-        return []
+    ps_servers = _pansou_servers(ps_data)
+
+    def ps_search(server):
+        """单个 PanSou 实例的搜索（失败返回空，不影响其它实例）"""
+        try:
+            return PanSou(server).search(query, deep) or []
+        except Exception:  # noqa: BLE001
+            return []
 
     search_results = []
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         futures = []
         if str(cs_data.get("enable", "true")).lower() == "true":
             futures.append(executor.submit(cs_search))
         if str(ps_data.get("enable", "true")).lower() == "true":
-            futures.append(executor.submit(ps_search))
+            # 多个 PanSou 实例并行查：公共实例会限流/超时/索引轮换，
+            # 多配几个（含自建）就能互相兜底
+            for _srv in ps_servers:
+                futures.append(executor.submit(ps_search, _srv))
         for future in as_completed(futures):
             search_results.extend(future.result() or [])
 
@@ -725,12 +755,20 @@ def _source_unreachable():
 
     src = config_data.get("source", {}) or {}
     dead = []
+    targets = []
     for key, label in (("pansou", "PanSou"), ("cloudsaver", "CloudSaver")):
         cfg = src.get(key) or {}
-        if str(cfg.get("enable", "true")).lower() != "true" or not cfg.get("server"):
+        if str(cfg.get("enable", "true")).lower() != "true":
             continue
+        servers = _pansou_servers(cfg) if key == "pansou" else [
+            str(cfg.get("server") or "").strip().rstrip("/")
+        ]
+        for srv in servers:
+            if srv:
+                targets.append((label, srv))
+    for label, srv in targets:
         try:
-            parsed = urlparse(str(cfg["server"]))
+            parsed = urlparse(srv)
             host = parsed.hostname
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
             if not host:
@@ -739,7 +777,12 @@ def _source_unreachable():
             conn.close()
         except Exception:
             dead.append(label)
-    return dead
+    # 去重保序
+    out = []
+    for d in dead:
+        if d not in out:
+            out.append(d)
+    return out
 
 
 def _enabled_sources():
