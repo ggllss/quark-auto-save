@@ -725,6 +725,24 @@
                       </small>
                       <a v-if="cand.shareurl" :href="cand.shareurl" target="_blank" rel="noopener noreferrer"
                          class="small d-block text-truncate" style="max-width:100%">{{ cand.shareurl }}</a>
+                      <!-- 标题看不出分享更新到哪一集，点一下直接列最新的文件 -->
+                      <div v-if="cand.shareurl" class="small">
+                        <span v-if="cand.latest_file" class="text-success mr-1" style="word-break:break-all">
+                          最新：{{ cand.latest_file }}
+                          <span class="text-muted">（共 {{ cand.latest_total }} 个）</span>
+                        </span>
+                        <a v-else href="#" @click.prevent="aiCheckLatest(cand)">看最新</a>
+                        <span v-if="aiLatest[cand.shareurl] && aiLatest[cand.shareurl].loading"
+                              class="text-muted ml-1">读取中…</span>
+                        <span v-else-if="aiLatest[cand.shareurl] && aiLatest[cand.shareurl].error"
+                              class="text-danger ml-1">{{ aiLatest[cand.shareurl].error }}</span>
+                        <span v-else-if="aiLatest[cand.shareurl] && (aiLatest[cand.shareurl].items || []).length"
+                              class="text-success ml-1" style="word-break:break-all"
+                              :title="(aiLatest[cand.shareurl].items || []).map(i => i.file_name).join('\n')">
+                          最新：{{ aiLatest[cand.shareurl].items[0].file_name }}
+                          <span class="text-muted">（共 {{ aiLatest[cand.shareurl].total }} 个文件）</span>
+                        </span>
+                      </div>
                     </td>
                     <td class="d-none d-md-table-cell"><small>{{ cand.source }}<span v-if="cand.channel"> / {{ cand.channel }}</span></small></td>
                     <td class="d-none d-md-table-cell"><small>{{ cand.datetime }}</small></td>
@@ -1329,6 +1347,8 @@
         aiScrollTarget: '',
         aiAnalyzeSeq: 0,
         aiManualOpen: false,
+        // 每个候选分享的最新文件预览：{ [shareurl]: {loading, items, total, error} }
+        aiLatest: {},
         aiAnalyzeElapsed: 0,
         aiAnalyzeTimer: null,
         aiDeleting: false,
@@ -1523,6 +1543,33 @@
           this.aiCommitLog = '';
           this.aiFilter = 'all';
           this.aiAnalyze();
+        },
+        // 看某个候选分享里最新的文件（标题判断不出更新到哪一集，合集类尤其容易误判）
+        aiCheckLatest(cand) {
+          const url = cand && cand.shareurl;
+          if (!url) return;
+          const cur = this.aiLatest[url];
+          if (cur && (cur.loading || (cur.items || []).length)) {
+            this.$set(this.aiLatest, url, null);   // 再点一次收起
+            return;
+          }
+          this.$set(this.aiLatest, url, { loading: true, items: [] });
+          axios.post('/ai/share_latest', { shareurl: url })
+            .then(response => {
+              const res = response.data;
+              if (!res.success) {
+                this.$set(this.aiLatest, url, { loading: false, items: [], error: res.message || '读取失败' });
+                return;
+              }
+              this.$set(this.aiLatest, url, {
+                loading: false,
+                items: (res.data && res.data.latest) || [],
+                total: res.data && res.data.total,
+              });
+            })
+            .catch(error => {
+              this.$set(this.aiLatest, url, { loading: false, items: [], error: '读取失败：' + error });
+            });
         },
         aiSelectLink(cand) {
           const list = (this.aiResult && this.aiResult.candidates) || [];

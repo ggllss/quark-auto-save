@@ -970,6 +970,31 @@ def ai_search():
             else:
                 candidates.append(c)
 
+    # ⑤ 补「这个分享里最新的文件」：标题看不出它更新到哪一集，
+    # 直接读一遍分享内容，把真正有新内容的分享顶到前面。
+    # （实测：含「第2期上」的是几个标题写「第三季」的全季合集，按标题排序会沉到最底部）
+    if candidates:
+        probe_account = _require_cookie()
+        if probe_account is not None:
+            def _probe(c):
+                try:
+                    info = _share_latest(probe_account, c["shareurl"], max_files=60)
+                except Exception:  # noqa: BLE001
+                    return
+                latest = info.get("latest") or []
+                if latest:
+                    c["latest_file"] = latest[0].get("file_name") or ""
+                    c["latest_date"] = latest[0].get("date") or ""
+                    c["latest_total"] = info.get("total")
+
+            with ThreadPoolExecutor(max_workers=8) as probe_pool:
+                list(probe_pool.map(_probe, candidates[:10]))
+            # 内容最新（最新文件日期）的排前面，同日期按相关度
+            candidates.sort(
+                key=lambda c: (c.get("latest_date") or "", c.get("score") or 0),
+                reverse=True,
+            )
+
     task, reason = _match_task_by_title(intent.get("title") or "")
     baseline = None
     if task:
@@ -1672,6 +1697,62 @@ def ai_analyze():
             data["rule_suggestion"] = {"error": str(e)}
 
     return jsonify({"success": True, "data": data})
+
+
+def _share_latest(account, shareurl, max_files=120):
+    """
+    读某个分享里最新的几个文件。
+
+    搜索结果的标题只反映「发布时的描述」，判断不出这个分享现在更新到哪一集，
+    合集类分享（标题写「第三季」但里面是全季）尤其容易误判。
+    返回 {"total": n, "latest": [{"file_name", "dir_path", "date"}], "truncated": bool}
+    """
+    pwd_id, passcode, pdir_fid, _ = account.extract_url(shareurl)
+    if not pwd_id:
+        raise ValueError("分享链接无效")
+    stoken_ret = account.get_stoken(pwd_id, passcode)
+    if stoken_ret.get("status") != 200:
+        raise ValueError(stoken_ret.get("message") or "分享不可用")
+    stoken = stoken_ret["data"]["stoken"]
+    # 必须先带 _fetch_share=1 拉一次，后续 get_detail 才拿得到列表
+    account.get_detail(pwd_id, stoken, pdir_fid or "", _fetch_share=1, fetch_share_full_path=1)
+    items, truncated = _expand_share_files(
+        account, pwd_id, stoken, pdir_fid or "", max_depth=3, max_files=max_files
+    )
+    files = [i for i in items if not i.get("dir")]
+    for f in files:
+        f["_date"] = tmdb.name_date(f.get("file_name") or "")
+    files.sort(key=lambda f: (f["_date"], f.get("updated_at") or 0), reverse=True)
+    return {
+        "total": len(files),
+        "truncated": truncated,
+        "latest": [
+            {
+                "file_name": f.get("file_name"),
+                "dir_path": f.get("dir_path") or "",
+                "date": f["_date"],
+            }
+            for f in files[:5]
+        ],
+    }
+
+
+@app.route("/ai/share_latest", methods=["POST"])
+def ai_share_latest():
+    """看某个分享里最新的几个文件（点之前就知道它更新到哪一集）"""
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    body = request.json or {}
+    shareurl = (body.get("shareurl") or "").strip()
+    if not shareurl:
+        return jsonify({"success": False, "message": "缺少分享链接"})
+    account = _require_cookie()
+    if account is None:
+        return jsonify({"success": False, "message": "请先在系统配置里填写 Cookie"})
+    try:
+        return jsonify({"success": True, "data": _share_latest(account, shareurl)})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"success": False, "message": f"读取分享失败：{e}"})
 
 
 @app.route("/ai/delete", methods=["POST"])
