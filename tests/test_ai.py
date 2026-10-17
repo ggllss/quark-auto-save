@@ -317,6 +317,13 @@ def test_search_filter():
     run._SEARCH_CACHE["old"] = (0, [9])
     check("过期缓存不再返回", run._search_cache_get("old") is None)
 
+    # 空结果绝不能进缓存：否则源临时超时一次，用户 10 分钟内反复搜都是空
+    run._SEARCH_CACHE.clear()
+    run._search_cache_maybe_put("empty", [])
+    check("空结果不写入缓存", run._search_cache_get("empty") is None)
+    run._search_cache_maybe_put("full", [{"taskname": "x"}])
+    check("有结果才写入缓存", run._search_cache_get("full") == [{"taskname": "x"}])
+
 
 def test_share_expand():
     print("【11】分享里的文件夹展开成文件")

@@ -647,6 +647,16 @@ def _search_cache_put(key, value):
     _SEARCH_CACHE[key] = (time.time(), value)
 
 
+def _search_cache_maybe_put(key, pool):
+    """
+    只缓存有结果的搜索。
+    空结果多半是搜索源临时超时/限流造成的，缓存下来会让用户反复搜同一个词
+    都拿到空结果，误以为「这部剧就是没有资源」。
+    """
+    if pool:
+        _search_cache_put(key, pool)
+
+
 def _name_is_relevant(title, aliases, candidate_name):
     """候选标题里是否真的含这部剧的名字，用来挡掉完全无关的链接"""
     name = ai.normalize_name(candidate_name)
@@ -762,7 +772,7 @@ def ai_search():
         if not pool and queries and elapsed < 10:
             retried = True
             pool = gather()
-        _search_cache_put(cache_key, pool)
+        _search_cache_maybe_put(cache_key, pool)
 
     # ① 相关性过滤：标题里完全不含剧名/别名的，直接挡掉
     title = intent.get("title") or keyword
@@ -771,14 +781,10 @@ def ai_search():
     dropped_irrelevant = len(pool) - len(relevant)
 
     # ② 排序（AI 参与）
+    # 不再按模型评分做绝对阈值过滤：实测模型打分普遍偏低（29 条里 28 条低于 40 分），
+    # 按分数砍会把结果砍空；「是否相关」已由标题过滤保证，「是否有效」由存活检测保证。
     ranked = ai.rank_links(intent, relevant[:60], client) if relevant else []
-
-    # ③ 模型给出评分时，丢掉明显不相关的低分项
     dropped_low_score = 0
-    if ranked and ranked[0].get("rank_source") == "ai":
-        kept = [c for c in ranked if (c.get("score") or 0) >= 40]
-        dropped_low_score = len(ranked) - len(kept)
-        ranked = kept
 
     # ④ 存活检测：只查靠前的候选，已失效的链接不展示（用户说的「无效链接」）
     dropped_dead = 0
