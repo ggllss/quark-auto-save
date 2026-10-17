@@ -240,6 +240,44 @@ def test_http_layer():
         ai.requests.post = real_post
 
 
+def test_folder_match():
+    print("【9】媒体类型与目标文件夹匹配")
+    # 目录名季号拆分（用真实的媒体库目录名做样本）
+    for raw, want in [
+        ("中餐厅S09", ("中餐厅", 9)),
+        ("喜人奇妙夜2", ("喜人奇妙夜", 2)),
+        ("忙忙碌碌寻宝藏S02", ("忙忙碌碌寻宝藏", 2)),
+        ("背着善宰跑", ("背着善宰跑", None)),
+        ("现在就出发", ("现在就出发", None)),
+        ("五哈", ("五哈", None)),
+        ("第二季", ("第二季", None)),
+    ]:
+        got = ai.split_season(raw)
+        check("%s → %r" % (raw, want), got == want, got)
+
+    dirs = ["现在就出发", "忙忙碌碌寻宝藏S02", "中餐厅S09", "中餐厅S10", "中餐厅S08",
+            "妻子的浪漫旅行", "风华合伙人", "五哈", "喜人奇妙夜2", "奔跑吧·天路篇"]
+    check("第十季命中 S10", ai.match_folder("中餐厅", [], dirs, season=10)[0] == "中餐厅S10")
+    check("第九季命中 S09", ai.match_folder("中餐厅", [], dirs, season=9)[0] == "中餐厅S09")
+    check("第二季命中「喜人奇妙夜2」",
+          ai.match_folder("喜人奇妙夜", [], dirs, season=2)[0] == "喜人奇妙夜2")
+    check("不带季号的剧照常命中",
+          ai.match_folder("现在就出发", [], dirs, season=4)[0] == "现在就出发")
+    check("库中没有的剧不误命中", ai.match_folder("甄嬛传", [], dirs)[0] is None)
+    check("季号完全不存在时判为未命中（应新建）",
+          ai.match_folder("中餐厅", [], dirs, season=3)[0] is None)
+    # 前缀匹配故意保守：宁可新建文件夹，也不把文件放进「可能是同一部也可能不是」的目录
+    check("弱前缀不误合并", ai.match_folder("奔跑吧", [], dirs)[0] is None)
+    check("标点差异不影响精确匹配",
+          ai.match_folder("奔跑吧·天路篇", [], dirs)[0] == "奔跑吧·天路篇")
+    check("别名可参与匹配",
+          ai.match_folder("Lovely Runner", ["背着善宰跑"], ["背着善宰跑"])[0] == "背着善宰跑")
+
+    for text, want in [("火影忍者 动漫", "动漫"), ("某某综艺 第三季", "综艺"),
+                       ("海蓝 纪录片", "纪录片"), ("背着善宰跑", "")]:
+        check("类型兜底 %s → %r" % (text, want or "（空）"), ai.guess_category(text) == want)
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -261,6 +299,7 @@ def main():
     test_rule_local(mr, presets, files)
     test_ai_paths(mr, presets, files)
     test_http_layer()
+    test_folder_match()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0

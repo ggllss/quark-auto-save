@@ -292,6 +292,92 @@ async function testFetchDataNormalize() {
   check('缺字段补默认值', ctx.formData.ai.model === '' && ctx.formData.ai.base_url === '');
 }
 
+async function testPathResolution() {
+  console.log('【7】类型判定与入库路径解析');
+  check('路径解析方法已定义',
+    typeof ctx.aiResolvePath === 'function' && typeof ctx.aiApplyResolved === 'function');
+
+  ctx.aiApplyResolved({
+    category: '综艺', category_source: 'existing_folder', season: 4,
+    matched_folder: '现在就出发', folder_exists: true,
+    season_dir: 'S04', season_exists: false,
+    savepath: '/0-影音/综艺/现在就出发/S04', create_dirs: [], note: '命中已有文件夹',
+    category_options: ['电视剧', '电影', '动漫', '综艺', '纪录片']
+  });
+  check('应用判定出的类型', ctx.aiForm.category === '综艺', ctx.aiForm.category);
+  check('应用季号', ctx.aiForm.season === 4, ctx.aiForm.season);
+  check('应用入库路径', ctx.aiForm.savepath === '/0-影音/综艺/现在就出发/S04', ctx.aiForm.savepath);
+  check('记录「已存在」状态', ctx.aiResolved && ctx.aiResolved.folder_exists === true);
+
+  calls.length = 0;
+  global.__nextResponse = {
+    data: {
+      success: true, data: {
+        category: '电视剧', category_source: 'manual', season: 4, matched_folder: null,
+        folder_exists: false, season_dir: 'S04', season_exists: false,
+        savepath: '/0-影音/电视剧/现在就出发/S04',
+        create_dirs: ['/0-影音/电视剧/现在就出发', '/0-影音/电视剧/现在就出发/S04'],
+        note: '将新建：/0-影音/电视剧/现在就出发/S04',
+        category_options: ['电视剧', '电影', '动漫', '综艺', '纪录片']
+      }
+    }
+  };
+  ctx.aiForm.category = '电视剧';
+  ctx.aiResolvePath();
+  await tick();
+  const rp = calls.find(c => c[1] === '/ai/resolve_path');
+  check('切换类型会调用 /ai/resolve_path', !!rp);
+  check('请求带上类型与季号', !!rp && rp[2].category === '电视剧' && rp[2].season === 4,
+    rp && rp[2]);
+  check('未命中时按新文件夹计算路径',
+    ctx.aiForm.savepath === '/0-影音/电视剧/现在就出发/S04', ctx.aiForm.savepath);
+  check('标记为「将新建」', ctx.aiResolved.folder_exists === false);
+  check('给出要新建的层级', (ctx.aiResolved.create_dirs || []).length === 2,
+    ctx.aiResolved.create_dirs);
+
+  calls.length = 0;
+  ctx.aiForm.keyword = '现在就出发 第四季';
+  global.__nextResponse = {
+    data: {
+      success: true, data: {
+        intent: { title: '现在就出发', season: 4, aliases: [], queries: ['现在就出发'], source: 'ai', category: '综艺' },
+        ai_used: true,
+        candidates: [{ taskname: 'x', shareurl: 'https://pan.quark.cn/s/x', score: 90 }],
+        baseline: { taskname: '现在就出发', savepath: '/0-影音/综艺/现在就出发/S04', pattern: '$TV_MAGIC', replace: '', match_reason: '剧名完全一致' },
+        resolved: {
+          category: '综艺', category_source: 'existing_folder', season: 4,
+          matched_folder: '现在就出发', folder_exists: true,
+          season_dir: 'S04', season_exists: true,
+          savepath: '/0-影音/综艺/现在就出发/S04', create_dirs: [], note: '命中已有文件夹「现在就出发」'
+        }
+      }
+    }
+  };
+  ctx.aiSearch();
+  await tick();
+  check('搜索后自动应用入库路径',
+    ctx.aiForm.savepath === '/0-影音/综艺/现在就出发/S04', ctx.aiForm.savepath);
+  check('搜索后自动填充类型', ctx.aiForm.category === '综艺', ctx.aiForm.category);
+  check('搜索后自动填充季号', ctx.aiForm.season === 4, ctx.aiForm.season);
+  check('与已有任务路径一致时不提示', ctx.aiBaselinePath === '', ctx.aiBaselinePath);
+}
+
+function testMobileMarkup() {
+  console.log('【8】手机端适配');
+  const trCount = (html.match(/table-responsive/g) || []).length;
+  check('所有表格都支持横向滚动', trCount >= 3, trCount);
+  check('分析结果有手机端卡片视图', /d-md-none[\s\S]{0,900}aiAnalysis\.rows/.test(html));
+  check('分析表格仅在中屏以上显示', html.includes('d-none d-md-block table-responsive'));
+  check('候选表次要列在小屏隐藏', html.includes('d-none d-md-table-cell'));
+  check('操作按钮区支持换行', html.includes('d-flex flex-wrap align-items-center'));
+  check('手机端有独立的全选控件', html.includes('aiSelectAllMobile'));
+  check('类型/季号输入在手机上不被挤压',
+    html.includes('col-6 col-md-2') && html.includes('col-12 col-md-4'));
+  check('「已存在 / 将新建」徽标按是否需要新建层级判定',
+    html.includes("(aiResolved.create_dirs || []).length ? '将新建文件夹' : '存入已有文件夹'"));
+  check('类型目录可在系统配置里修改', html.includes('formData.ai.media_roots[t]'));
+}
+
 (async () => {
   await testComponent();
   testHandlers();
@@ -299,6 +385,8 @@ async function testFetchDataNormalize() {
   testSelectAll();
   await testAiFlow();
   await testFetchDataNormalize();
+  await testPathResolution();
+  testMobileMarkup();
   console.log('\n结果: ' + passed + ' 通过, ' + failed + ' 失败');
   process.exit(failed ? 1 : 0);
 })();
