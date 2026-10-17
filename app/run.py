@@ -983,6 +983,32 @@ def _extract_se(name, mr):
     return season, episode
 
 
+# 花絮类素材：这些不是正片，统一收进 S00（Special 季），
+# Emby/Jellyfin 只有在 S00 里才会把它们当特辑刮削
+EXTRA_MARKERS = (
+    "先导", "纯享", "花絮", "加更", "预告", "彩蛋", "番外",
+    "会员版", "特辑", "回顾", "未播", "幕后", "路透", "reaction",
+)
+
+
+def _is_extra_file(name):
+    """是不是花絮类素材（先导/纯享/花絮/加更…）"""
+    low = (name or "").lower()
+    return any(m in low for m in EXTRA_MARKERS)
+
+
+def _extra_label(name, taskname=""):
+    """从花絮文件名里提取可读描述：去掉开头的日期和剧名前缀"""
+    stem = os.path.splitext(name or "")[0]
+    stem = re.sub(r"^20\d{2}[.\-_]?\d{1,2}[.\-_]?\d{1,2}\s*[-_. ]?\s*", "", stem)
+    for prefix in (taskname, taskname + "4", taskname + "第四季"):
+        if prefix and stem.startswith(prefix):
+            stem = stem[len(prefix):].lstrip(".-_ ")
+            break
+    stem = re.sub(r'[\\/:*?"<>|]', " ", stem).strip()
+    return stem[:60]
+
+
 # 综艺/剧集的「内容信号」：这些才是判断「是不是同一集」的依据。
 # 只看 E 号会误判——综艺一期分上下集，E 往往只是文件序号。
 _CONTENT_TAGS = ("加更", "花絮", "先导", "回顾", "纯享", "预告", "特辑", "彩蛋", "番外", "会员版")
@@ -1129,6 +1155,31 @@ def ai_analyze():
     except Exception as e:
         dir_note = f"读取目标目录失败：{e}"
 
+    # ②b 花絮素材的目标目录：S00（Special 季）
+    show_root = savepath_norm
+    if re.fullmatch(r"[Ss]\d{1,2}", (savepath_norm.rsplit("/", 1)[-1] or "")):
+        show_root = savepath_norm.rsplit("/", 1)[0] or "/"
+    extra_dir = re.sub(r"/{2,}", "/", f"{show_root}/S00")
+    extra_names = []
+    extra_exists = False
+    extra_note = ""
+    has_extra = any(
+        _is_extra_file(f.get("file_name")) for f in share_list if not f.get("dir")
+    )
+    if has_extra:
+        try:
+            efids = account.get_fids([extra_dir])
+            if efids:
+                extra_exists = True
+                els = account.ls_dir(efids[0]["fid"])
+                extra_names = [
+                    x["file_name"] for x in (els.get("data", {}).get("list") or [])
+                ]
+            else:
+                extra_note = f"花絮素材会新建 {extra_dir} 统一收录"
+        except Exception as e:
+            extra_note = f"读取花絮目录失败：{e}"
+
     # ③ 逐文件判定
     mr = MagicRename(config_data.get("magic_regex", {}))
     mr.set_taskname(taskname)
@@ -1163,6 +1214,28 @@ def ai_analyze():
         except Exception:
             resolved_names = {}
 
+    # 花絮素材命名：{剧名}.S00E{序号}.{原描述}.{EXT}，按文件名排序赋号（时间顺序）
+    extra_new = {}
+    _extras = sorted(
+        [f for f in share_list if not f.get("dir") and _is_extra_file(f.get("file_name"))],
+        key=lambda f: f.get("file_name") or "",
+    )
+    # 序号接着 S00 里已有的最大值往下排，避免和已归档的特辑撞名
+    _seq = 0
+    for _n in extra_names:
+        _m = re.search(r"S00E(\d{1,3})", _n, re.I)
+        if _m:
+            _seq = max(_seq, int(_m.group(1)))
+    for _i, _f in enumerate(_extras, _seq + 1):
+        _fn = _f.get("file_name") or ""
+        _stem, _ext = os.path.splitext(_fn)
+        _label = _extra_label(_fn, taskname)
+        extra_new[_f.get("fid")] = (
+            f"{taskname}.S00E{_i:02d}.{_label}{_ext}"
+            if _label
+            else f"{taskname}.S00E{_i:02d}{_ext}"
+        )
+
     # 库里已有文件的季集索引，用于识别「同一集但文件名不同」的重复
     dir_content = [(n, content_key(n)) for n in dir_names]
     dir_se = []
@@ -1170,6 +1243,12 @@ def ai_analyze():
         _s, _e = _extract_se(_name, mr)
         if _e is not None:
             dir_se.append((_s, _e))
+    extra_content = [(n, content_key(n)) for n in extra_names]
+    extra_se = []
+    for _name in extra_names:
+        _s, _e = _extract_se(_name, mr)
+        if _e is not None:
+            extra_se.append((_s, _e))
 
     rows = []
     for f in share_list:
@@ -1211,19 +1290,42 @@ def ai_analyze():
                     "exists": exists,
                     "lib_name": name if exists else "",
                     "default_selected": not exists,
+                    "target_savepath": savepath_norm,
+                    "target_dir": "",
                 }
             )
         else:
-            in_rule = (
-                bool(re.search(rule_pattern, name))
-                if (rule_pattern and rule_ok)
-                else True
-            )
-            exists_orig = bool(mr.is_exists(name, dir_names))
-            new_name = resolved_names.get(name) or (
-                mr.sub(rule_pattern, rule_replace, name) if rule_ok else name
-            )
-            exists_new = bool(mr.is_exists(new_name, dir_names))
+            # 花絮素材（先导/纯享/花絮/加更…）统一收进 S00，不套用正片规则
+            is_extra = _is_extra_file(name)
+            if is_extra:
+                # 花絮素材要同时比对 S00 和正片目录：
+                # 用户历史库里这类素材多半还留在 S04，不能因为换了归档位置就重下一遍。
+                # 但绝不做 E 号比对——S00Exx 的 xx 是序号，和正片的 E 号无关，
+                # 否则 S00E01 会被误判成库里已有的 E01。
+                cmp_names = extra_names + dir_names
+                cmp_content = extra_content + dir_content
+                cmp_se = []
+            else:
+                cmp_names = dir_names
+                cmp_content = dir_content
+                cmp_se = dir_se
+            row["is_extra"] = is_extra
+            row["target_savepath"] = extra_dir if is_extra else savepath_norm
+            row["target_dir"] = "S00" if is_extra else ""
+            if is_extra:
+                in_rule = True
+                new_name = extra_new.get(f.get("fid")) or name
+            else:
+                in_rule = (
+                    bool(re.search(rule_pattern, name))
+                    if (rule_pattern and rule_ok)
+                    else True
+                )
+                new_name = resolved_names.get(name) or (
+                    mr.sub(rule_pattern, rule_replace, name) if rule_ok else name
+                )
+            exists_orig = bool(mr.is_exists(name, cmp_names))
+            exists_new = bool(mr.is_exists(new_name, cmp_names))
             row["new_name"] = new_name or name
             row["in_rule"] = in_rule
             if rule_ok and re.search(
@@ -1243,7 +1345,7 @@ def ai_analyze():
             elif not in_rule:
                 row.update({"status": "unmatched", "status_text": "不匹配规则"})
             else:
-                conflict = _episode_conflict(row["new_name"], mr, dir_se, dir_content)
+                conflict = _episode_conflict(row["new_name"], mr, cmp_se, cmp_content)
                 if conflict:
                     row.update(
                         {
@@ -1290,6 +1392,7 @@ def ai_analyze():
         "unmatched": sum(1 for r in rows if r["status"] == "unmatched"),
         "folder": sum(1 for r in rows if r["status"] == "folder"),
         "collision": sum(1 for r in rows if r.get("collision")),
+        "extra": sum(1 for r in rows if r.get("is_extra")),
     }
 
     data = {
@@ -1298,6 +1401,9 @@ def ai_analyze():
         "savepath": savepath_norm,
         "savepath_exists": savepath_exists,
         "dir_note": dir_note,
+        "extra_dir": extra_dir,
+        "extra_exists": extra_exists,
+        "extra_note": extra_note,
         "dir_file_count": len(dir_names),
         "dir_files": dir_names[:100],
         # 分享里的文件夹已递归展开成文件；被截断时提示一下
@@ -1408,21 +1514,27 @@ def ai_commit():
 
     # 勾选的条目可能来自分享里的不同目录（文件夹已展开成文件），
     # 转存引擎一次只处理一个目录，所以按目录分批转存
+    # 花絮素材会落到 S00，所以分组键要带上目标路径
     groups = {}
     for f in files:
         if not f.get("fid"):
             continue
-        groups.setdefault(f.get("parent_fid") or "", []).append(f)
+        key = (
+            f.get("parent_fid") or "",
+            re.sub(r"/{2,}", "/", f"/{(f.get('target_savepath') or '').strip() or savepath}"),
+        )
+        groups.setdefault(key, []).append(f)
     if not groups:
         return jsonify({"success": False, "message": "勾选的条目缺少 fid"})
 
     savepath_norm = re.sub(r"/{2,}", "/", f"/{savepath}")
-    # 目标目录不存在则创建（新剧入库场景）
-    try:
-        if not account.get_fids([savepath_norm]):
-            account.mkdir(savepath_norm)
-    except Exception:
-        pass
+    # 目标目录（含 S00）不存在则创建
+    for _dir in {sp for (_pf, sp) in groups}:
+        try:
+            if not account.get_fids([_dir]):
+                account.mkdir(_dir)
+        except Exception:
+            pass
 
     try:
         pwd_id, _passcode, root_pdir, _ = account.extract_url(shareurl)
@@ -1442,7 +1554,8 @@ def ai_commit():
     ok_all = True
     renamed = 0
     last_tree = None
-    for parent_fid, group in groups.items():
+    last_savepath = ""
+    for (parent_fid, group_savepath), group in groups.items():
         rename_map = {}
         for f in group:
             orig = f.get("file_name") or ""
@@ -1458,7 +1571,7 @@ def ai_commit():
         task = {
             "taskname": taskname,
             "shareurl": sub_url,
-            "savepath": savepath_norm,
+            "savepath": group_savepath,
             # 成员资格由用户勾选（fid_list）决定；pattern 放开为全匹配，
             # 文件名一律由 rename_map 给出，避免规则再次筛掉用户选中的文件
             "pattern": ".*",
@@ -1466,13 +1579,17 @@ def ai_commit():
             "fid_list": [f["fid"] for f in group],
             "rename_map": rename_map,
         }
-        buf.write("—— %s（%d 个文件）\n" % (parent_fid or "分享根目录", len(group)))
+        buf.write(
+            "—— %s → %s（%d 个文件）\n"
+            % (parent_fid or "分享根目录", group_savepath, len(group))
+        )
         try:
             with contextlib.redirect_stdout(buf):
                 tree = account.do_save_task(task)
             ok_all = ok_all and bool(tree)
             if tree:
                 last_tree = tree
+                last_savepath = group_savepath
         except Exception as e:
             buf.write("转存异常：%s\n%s\n" % (e, traceback.format_exc()))
             ok_all = False
@@ -1486,7 +1603,7 @@ def ai_commit():
             )
             plugin_task = {
                 "taskname": taskname,
-                "savepath": savepath_norm,
+                "savepath": last_savepath or savepath_norm,
                 "shareurl": shareurl,
                 "pattern": ".*",
                 "replace": "",

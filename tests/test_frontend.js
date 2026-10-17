@@ -570,6 +570,9 @@ async function testMobileInteraction() {
     html.includes('aiSelectedCandidate.shareurl'));
   check('展示文件大小', html.includes('row.size | size'));
   check('撞名时给出告警', html.includes('aiAnalysis.stats.collision'));
+  check('展示花絮素材的去向 S00',
+    html.includes('aiAnalysis.stats.extra') && html.includes('aiAnalysis.extra_dir'));
+  check('每行标出花絮素材去向', html.includes('row.target_dir'));
   check('支持批量删除已在库', html.includes('aiDeleteAllExists'));
 
   console.log('\n结果: ' + passed + ' 通过, ' + failed + ' 失败');

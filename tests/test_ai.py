@@ -488,6 +488,31 @@ def test_content_key():
           not run._same_content(a, plain), (a, plain))
 
 
+def test_extra_routing():
+    print("【15】花絮素材统一收进 S00（Special 季）")
+    import run
+
+    for n in ("2026.10.1-先导片下.mp4", "20261015-第1期花絮特辑.mp4",
+              "20261012-第1期加更.mp4", "20260927.回顾特辑.mp4",
+              "先导片上.mp4", "第1期纯享版.mp4"):
+        check(f"{n} 识别为花絮素材", run._is_extra_file(n), n)
+    for n in ("20261011.第1期下.mp4", "现在就出发.E01.第1期上.mkv"):
+        check(f"{n} 是正片，不进 S00", not run._is_extra_file(n), n)
+
+    check("描述里去掉日期前缀",
+          run._extra_label("20261015-第1期花絮特辑.mp4") == "第1期花絮特辑",
+          run._extra_label("20261015-第1期花絮特辑.mp4"))
+    check("描述里去掉剧名前缀",
+          run._extra_label("现在就出发先导片上.mp4", "现在就出发") == "先导片上",
+          run._extra_label("现在就出发先导片上.mp4", "现在就出发"))
+    check("无前缀时保留原描述",
+          run._extra_label("先导片上.mp4") == "先导片上",
+          run._extra_label("先导片上.mp4"))
+    check("描述里的非法字符被清掉",
+          "/" not in run._extra_label("花絮/特辑.mp4"),
+          run._extra_label("花絮/特辑.mp4"))
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -515,6 +540,7 @@ def main():
     test_season_autodetect()
     test_notify_hook()
     test_content_key()
+    test_extra_routing()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0
