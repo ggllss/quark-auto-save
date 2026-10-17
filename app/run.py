@@ -1480,9 +1480,10 @@ def ai_analyze():
     }
 
     # ④ 可选：推荐命名规则
-    # 撞名时也自动推荐一次规则：默认规则（如 pattern 为空的 $TV_MAGIC）会把
-    # 「第N期上/下」这类区分信息丢掉，导致多个文件同名、内容比对失效
-    if want_rule or stats.get("collision"):
+    # 只在用户点了「推荐命名规则」时才调 AI：
+    # 撞名时自动推荐会让每次分析都多等一次 AI 调用（实测 +10 秒），
+    # 改为在撞名告警里引导用户点按钮
+    if want_rule:
         try:
             filenames = [r["file_name"] for r in rows if not r["dir"]]
             data["rule_suggestion"] = ai.suggest_rename_rule(

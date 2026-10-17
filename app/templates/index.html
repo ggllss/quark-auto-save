@@ -26,7 +26,7 @@
     }
 
     /* 分析结果滚动到顶部时，避开 sticky 的顶部导航 */
-    #aiAnalysisAnchor { scroll-margin-top: 64px; }
+    #aiAnalysisAnchor, #aiAnalyzeProgress { scroll-margin-top: 64px; }
 
     @media (max-width: 767.98px) {
       /* 给固定操作条留出空间，避免遮住最后一条 */
@@ -719,6 +719,16 @@
               </div>
             </div>
 
+            <!-- 分析进行中：必须有明确反馈，否则点完像没反应 -->
+            <div v-if="aiAnalyzing" id="aiAnalyzeProgress"
+                 class="alert alert-info py-2 small d-flex align-items-center">
+              <span class="spinner-border spinner-border-sm mr-2 flex-shrink-0"></span>
+              <span class="flex-fill">
+                正在分析：读取分享文件 → 比对库里已有文件 → 匹配 TMDB 集号
+                <b>已等待 {{ aiAnalyzeElapsed }} 秒</b>
+              </span>
+            </div>
+
             <!-- 步骤3：分析结果 + 规则编辑 -->
             <div v-if="aiAnalysis" id="aiAnalysisAnchor" class="ai-has-actionbar">
               <hr>
@@ -891,8 +901,8 @@
               </div>
               <div v-if="aiAnalysis.stats.collision" class="alert alert-danger py-2 small">
                 有 <b>{{ aiAnalysis.stats.collision }}</b> 个文件算出了相同的目标文件名，转存会互相覆盖。
-                综艺一期分上下集时，请换一条能保留「第N期 / 上 / 下」的命名规则
-                （点「推荐命名规则」），或手动改这些行的名字。
+                综艺一期分上下集时，请点下方「推荐命名规则」换一条能保留「第N期 / 上 / 下」的规则，
+                或手动改这些行的名字。
               </div>
               <div v-if="aiAnalysis.truncated" class="alert alert-warning py-2 small">
                 分享内容较多，只展开了前 300 个文件；没展开的文件夹会整包转存。
@@ -936,7 +946,8 @@
                         <span v-if="row.dir_path" class="badge badge-light mr-1">{{ row.dir_path }}</span>{{ row.file_name }}
                       </div>
                       <div class="small text-muted">
-                        {{ row.size ? (row.size | size) : '大小未知' }}
+                        <span v-if="row.size">{{ row.size | size }}</span>
+                        <span v-else>大小未知</span>
                         <span v-if="row.updated_at"> · {{ row.updated_at | ts2date }}</span>
                       </div>
                       <div v-if="row.dir_hint" class="small text-info text-break">{{ row.dir_hint }}</div>
@@ -978,7 +989,7 @@
                     <td>
                       <span v-if="row.dir_path" class="badge badge-light mr-1">{{ row.dir_path }}</span>
                       <small :title="row.file_name">{{ row.file_name }}</small>
-                      <small class="text-muted ml-1">{{ row.size ? (row.size | size) : '' }}</small>
+                      <small v-if="row.size" class="text-muted ml-1">{{ row.size | size }}</small>
                       <div v-if="row.dir_hint" class="small text-info">{{ row.dir_hint }}</div>
                     </td>
                     <td>
@@ -1297,6 +1308,8 @@
         aiFilter: 'all',
         aiScrollTarget: '',
         aiAnalyzeSeq: 0,
+        aiAnalyzeElapsed: 0,
+        aiAnalyzeTimer: null,
         aiDeleting: false,
         aiSearchElapsed: 0,
         aiSearchTimer: null,
@@ -1473,7 +1486,9 @@
           if (typeof document === 'undefined' || !document.getElementById) return;
           const el = document.getElementById(id);
           if (el && el.scrollIntoView) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            // 分析中的进度条会在请求结束后消失，平滑滚动可能卡在已移除的元素上，
+            // 这里用瞬时滚动，保证「点完马上看到进度」
+            el.scrollIntoView({ behavior: 'auto', block: 'start' });
           }
         },
         aiScrollToResults() {
@@ -1483,9 +1498,21 @@
           if (!this.aiForm.shareurl) { this.showToast('请先选择一个候选链接', 'warning'); return; }
           this.aiAnalyzing = true;
           this.aiError = '';
+          // 分析要读分享目录 + 比对库 + 查 TMDB，需要几秒，界面上必须能看到进度。
+          // 用自终止的 setTimeout 链而不是 setInterval：请求结束或序号过期就停，
+          // 不会像 setInterval 那样泄漏（泄漏会导致每秒多次整页重渲染，手机直接卡死）。
+          this.aiAnalyzeElapsed = 0;
+          if (this.aiAnalyzeTimer) { clearTimeout(this.aiAnalyzeTimer); this.aiAnalyzeTimer = null; }
           // 请求序号：切换链接时旧请求可能后返回，避免用旧结果覆盖新结果
           const seq = (this.aiAnalyzeSeq || 0) + 1;
           this.aiAnalyzeSeq = seq;
+          const tick = () => {
+            if (!this.aiAnalyzing || seq !== this.aiAnalyzeSeq) return;
+            this.aiAnalyzeElapsed += 1;
+            this.aiAnalyzeTimer = setTimeout(tick, 1000);
+          };
+          this.aiAnalyzeTimer = setTimeout(tick, 1000);
+          this.$nextTick(() => this.aiScrollTo('aiAnalyzeProgress'));
           axios.post('/ai/analyze', {
             shareurl: this.aiForm.shareurl,
             savepath: this.aiForm.savepath,
@@ -1530,7 +1557,12 @@
               this.aiError = '分析请求失败：' + error;
             })
             .finally(() => {
-              if (seq === this.aiAnalyzeSeq) this.aiAnalyzing = false;
+              if (seq !== this.aiAnalyzeSeq) return;   // 过期请求：计时链会自己停
+              this.aiAnalyzing = false;
+              if (this.aiAnalyzeTimer) {
+                clearTimeout(this.aiAnalyzeTimer);
+                this.aiAnalyzeTimer = null;
+              }
             });
         },
         aiApplyPreset() {

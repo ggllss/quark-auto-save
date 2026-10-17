@@ -484,7 +484,7 @@ async function testMobileInteraction() {
   check('分析区有滚动锚点', html.includes('id="aiAnalysisAnchor"'));
   check('手机端底部留白，避免被操作条遮挡', html.includes('ai-has-actionbar'));
   check('滚动到结果区时避开 sticky 导航',
-    html.includes('#aiAnalysisAnchor { scroll-margin-top: 64px; }'));
+    html.includes('#aiAnalysisAnchor') && html.includes('scroll-margin-top: 64px'));
   check('收起候选后可一键重新选择', html.includes('aiCandidatesCollapsed = false'));
   check('手机端把原有浮动按钮抬高避让', html.includes('.bottom-buttons { bottom: 84px; }'));
   check('入库后有日志锚点可自动滚到结果', html.includes('id="aiCommitLogAnchor"'));
@@ -512,7 +512,8 @@ async function testMobileInteraction() {
   ctx.aiForm.shareurl = 'https://pan.quark.cn/s/aaa';
   ctx.aiAnalyze();
   await tick();
-  check('入库后滚到日志而不是列表顶部', scrolled[0] === 'aiCommitLogAnchor', scrolled);
+  check('入库后滚到日志而不是列表顶部',
+    scrolled[scrolled.length - 1] === 'aiCommitLogAnchor', scrolled);
   check('滚动目标用完即清空', ctx.aiScrollTarget === '');
 }
 
@@ -564,6 +565,12 @@ async function testMobileInteraction() {
 
   check('列表里有单条删除按钮', html.includes('aiDeleteRow(row)'));
   check('默认进入 AI 追剧页', html.includes("activeTab: 'ai'"));
+  check('分析计时用 setTimeout 链（请求结束即停，不会泄漏）',
+    /this\.aiAnalyzeTimer = setTimeout/.test(inlineJs), null);
+  check('分析计时没有用 setInterval（泄漏会导致整页反复重渲染）',
+    !/aiAnalyzeTimer = setInterval/.test(inlineJs), null);
+  check('滚动进度条用瞬时滚动（smooth 会在元素移除后卡住）',
+    /scrollIntoView\(\{ behavior: 'auto'/.test(inlineJs), null);
   check('候选链接可点开（新窗口）',
     html.includes('target="_blank"') && html.includes('cand.shareurl'));
   check('收起后的切换条也显示链接',
@@ -574,6 +581,116 @@ async function testMobileInteraction() {
     html.includes('aiAnalysis.stats.extra') && html.includes('aiAnalysis.extra_dir'));
   check('每行标出花絮素材去向', html.includes('row.target_dir'));
   check('支持批量删除已在库', html.includes('aiDeleteAllExists'));
+
+  // ---------------------------------------------------------------- 真实渲染
+  // 用真实 Vue 编译并渲染整个模板：模板里任何非法表达式/未定义变量都会在这里暴露，
+  // 而不是等到用户点开某个面板时页面卡死。
+  console.log('\n【渲染】用真实 Vue 编译并渲染模板');
+  try {
+    // Vue 的完整版在加载时会读 navigator / document，先补齐最小桩
+    if (!global.navigator || !global.navigator.userAgent) {
+      Object.defineProperty(global, 'navigator', {
+        value: { userAgent: 'node' }, configurable: true, writable: true,
+      });
+    }
+    if (global.document && !global.document.createElement) {
+      global.document.createElement = function () {
+        return {
+          innerHTML: '',
+          children: [{ getAttribute: function () { return "'"; } }],
+          setAttribute: function () {},
+          getAttribute: function () { return "'"; },
+          appendChild: function () {},
+          style: {},
+        };
+      };
+    }
+    // 补齐 Vue 运行时可能用到的 DOM 接口
+    const doc = global.document;
+    if (doc) {
+      doc.querySelector = doc.querySelector || function () { return null; };
+      doc.querySelectorAll = doc.querySelectorAll || function () { return []; };
+      doc.getElementById = doc.getElementById || function () { return null; };
+      doc.addEventListener = doc.addEventListener || function () {};
+      doc.removeEventListener = doc.removeEventListener || function () {};
+      doc.body = doc.body || { appendChild: function () {}, removeChild: function () {}, classList: { add: function () {}, remove: function () {} } };
+      doc.documentElement = doc.documentElement || { style: {}, classList: { add: function () {}, remove: function () {} } };
+    }
+    if (global.window && !global.window.navigator) {
+      global.window.navigator = { userAgent: 'node' };
+    }
+    const VueReal = require(path.join(ROOT, 'app', 'static', 'js', 'vue@2.js'));
+    const appStart = html.indexOf('<div id="app">');
+    const scriptStart = html.indexOf('<script', appStart);
+    const template = html.slice(appStart, scriptStart);
+    check('模板根元素可定位', appStart > 0 && scriptStart > appStart);
+
+    const compiled = VueReal.compile(template);
+    check('模板编译无错误', typeof compiled.render === 'function');
+
+    const vueOptions = Object.assign({}, options, {
+      render: compiled.render,
+      staticRenderFns: compiled.staticRenderFns,
+      data: () => JSON.parse(JSON.stringify(options.data)),
+    });
+    delete vueOptions.el;   // 不挂载，只渲染，避免依赖真实 DOM
+    const vm = new VueReal(vueOptions);
+    check('组件实例创建成功', !!vm);
+
+    // 造一份真实形态的分析结果，覆盖分析结果区、花絮提示、删除按钮等
+    vm.aiAnalysis = {
+      rows: [{
+        fid: 'f1', file_name: '20261012-第1期加更.mp4',
+        new_name: '现在就出发.S00E138.第1期加更.mp4',
+        status: 'new', status_text: '可新增', selected: true,
+        size: 474877906, updated_at: 1792213701882, dir: false,
+        dir_path: 'X现在JCF44/', parent_fid: 'p1', in_rule: true,
+        is_extra: true, target_dir: 'S00', target_savepath: '/0-影音/综艺/现在就出发/S00',
+        lib_name: '', tmdb_episode: 138, tmdb_match: '日期 2026-10-12',
+        default_selected: true,
+      }],
+      stats: { total: 1, new: 1, exists: 0, dup_episode: 0, unmatched: 0,
+               folder: 0, collision: 0, extra: 1 },
+      savepath: '/0-影音/综艺/现在就出发/S04', savepath_exists: true,
+      dir_note: '', dir_file_count: 2,
+      extra_dir: '/0-影音/综艺/现在就出发/S00', extra_exists: false,
+      extra_note: '', tmdb_matched: 1, tmdb_enabled: true,
+      rule: { valid: true, pattern: '', replace: '', resolved_pattern: '',
+              resolved_replace: '{TASKNAME}.{SXX}E{E}.{EXT}', missing: [], unresolved: [] },
+      rule_suggestion: null, truncated: false, expanded_count: 1,
+    };
+    vm.aiResult = {
+      candidates: [{ taskname: '现在就出发 第四季', shareurl: 'https://pan.quark.cn/s/abc',
+                     score: 98, source: 'pansou', datetime: '', channel: '' }],
+      intent: { title: '现在就出发', season: null, category: '综艺', aliases: [], queries: ['现在就出发'] },
+      filtered: { irrelevant: 0, dead: 0, low_score: 0 },
+      pool_size: 1, from_cache: false, retried: false, attempts: 1, hint: '',
+    };
+    vm.aiSelectedCandidate = vm.aiResult.candidates[0];
+    vm.aiCandidatesCollapsed = true;
+    vm.aiAnalyzing = false;
+
+    let renderErr = null;
+    try {
+      vm._render();
+    } catch (e) {
+      renderErr = e;
+    }
+    check('分析结果区渲染无异常', !renderErr, renderErr && String(renderErr.message || renderErr));
+
+    // 分析进行中的状态也要能渲染
+    vm.aiAnalyzing = true;
+    vm.aiAnalyzeElapsed = 3;
+    let renderErr2 = null;
+    try {
+      vm._render();
+    } catch (e) {
+      renderErr2 = e;
+    }
+    check('分析中（进度条）渲染无异常', !renderErr2, renderErr2 && String(renderErr2.message || renderErr2));
+  } catch (e) {
+    check('真实渲染测试可运行', false, String(e && e.message || e));
+  }
 
   console.log('\n结果: ' + passed + ' 通过, ' + failed + ' 失败');
   process.exit(failed ? 1 : 0);
