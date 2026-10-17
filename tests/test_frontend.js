@@ -636,6 +636,10 @@ async function testMobileInteraction() {
   check('用户手动选过预设就不再被覆盖', ctx.aiForm.pattern === '$ZONGYI_MAGIC', ctx.aiForm.pattern);
   ctx.aiPatternTouched = false;
 
+  // 「花絮素材 →」只能贴在花絮行上；多季的正片行要显示「分季 →」
+  check('花絮标签只在花絮行显示', /v-if="row\.is_extra && row\.target_dir"[\s\S]{0,80}花絮素材 →/.test(html));
+  check('正片多季行显示「分季 →」', html.includes('分季入库 →') || html.includes('分季 →'));
+
   check('列表里有单条删除按钮', html.includes('aiDeleteRow(row)'));
   check('默认进入 AI 追剧页', html.includes("activeTab: 'ai'"));
   check('分析计时用 setTimeout 链（请求结束即停，不会泄漏）',

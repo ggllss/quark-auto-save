@@ -32,7 +32,10 @@
       /* 给固定操作条留出空间，避免遮住最后一条 */
       .ai-has-actionbar { padding-bottom: 88px; }
 
-      /* 抬高原有的圆形浮动按钮（保存/运行/回顶），避免与操作条重叠 */
+      /* AI 追剧页：隐藏悬浮的保存/运行/回顶按钮——它会压住文件列表和勾选框，
+         而且这一页已经有底部常驻的入库条了 */
+      .ai-active .bottom-buttons { display: none; }
+      /* 其它页：抬高，避免与操作条重叠 */
       .bottom-buttons { bottom: 84px; }
       .bottom-buttons button { width: 44px; height: 44px; }
 
@@ -114,7 +117,7 @@
         </div>
       </nav>
 
-      <main class="col-md-9 col-lg-10 ml-sm-auto">
+      <main class="col-md-9 col-lg-10 ml-sm-auto" :class="{'ai-active': activeTab === 'ai'}">
         <form @submit.prevent="saveConfig" @keydown.enter.prevent>
 
           <div v-if="activeTab === 'config'">
@@ -946,9 +949,14 @@
                 </div>
               </div>
               <div v-if="aiAnalysis.stats.collision" class="alert alert-danger py-2 small">
-                有 <b>{{ aiAnalysis.stats.collision }}</b> 个文件算出了相同的目标文件名，转存会互相覆盖。
-                综艺一期分上下集时，请点下方「推荐命名规则」换一条能保留「第N期 / 上 / 下」的规则，
-                或手动改这些行的名字。
+                有 <b>{{ aiAnalysis.stats.collision }}</b> 个文件在同一目录下算出了相同的文件名，转存会互相覆盖。
+                <template v-if="aiForm.category === '综艺'">
+                  综艺一期分上下集时，请点下方「推荐命名规则」换一条能保留「第N期 / 上 / 下」的规则。
+                </template>
+                <template v-else>
+                  通常是命名规则丢掉了区分信息（季号 / 集号 / 版本），请换一条规则。
+                </template>
+                也可以手动改这些行的名字。
               </div>
               <div v-if="aiAnalysis.truncated" class="alert alert-warning py-2 small">
                 分享内容较多，只展开了前 300 个文件；没展开的文件夹会整包转存。
@@ -997,8 +1005,11 @@
                         <span v-if="row.updated_at"> · {{ row.updated_at | ts2date }}</span>
                       </div>
                       <div v-if="row.dir_hint" class="small text-info text-break">{{ row.dir_hint }}</div>
-                      <div v-if="row.target_dir" class="small text-info">
+                      <div v-if="row.is_extra && row.target_dir" class="small text-info">
                         花絮素材 → 收进 {{ row.target_dir }}
+                      </div>
+                      <div v-else-if="row.target_dir" class="small text-info">
+                        分季入库 → {{ row.target_dir }}
                       </div>
                       <input type="text" class="form-control form-control-sm mt-1" v-model="row.new_name"
                              :disabled="row.dir"
@@ -1042,7 +1053,8 @@
                       <input type="text" class="form-control form-control-sm" v-model="row.new_name"
                              :disabled="row.dir"
                              :title="row.dir ? '文件夹整体转存，不重命名' : '可直接改成你想要的文件名'">
-                      <small v-if="row.target_dir" class="text-info">花絮素材 → {{ row.target_dir }}</small>
+                      <small v-if="row.is_extra && row.target_dir" class="text-info">花絮素材 → {{ row.target_dir }}</small>
+                      <small v-else-if="row.target_dir" class="text-info d-block">分季 → {{ row.target_dir }}</small>
                     </td>
                   </tr>
                 </tbody>

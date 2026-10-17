@@ -1799,18 +1799,21 @@ def ai_analyze():
 
     # 命名撞车检测：多个文件算出同一个名字，转存时会互相覆盖，
     # 这种情况通常说明所选规则把「第N期上/下」这类区分信息丢了
+    # 只有「同一个目标目录 + 同一个文件名」才会真覆盖；
+    # 辅助文件（海报/nfo）本来就不入库，也不参与判断
     name_count = {}
     for r in rows:
-        if r.get("dir"):
+        if r.get("dir") or r.get("aux"):
             continue
         nm = (r.get("new_name") or "").strip()
         if nm:
-            name_count[nm] = name_count.get(nm, 0) + 1
+            key = ((r.get("target_savepath") or ""), nm)
+            name_count[key] = name_count.get(key, 0) + 1
     for r in rows:
-        if r.get("dir"):
+        if r.get("dir") or r.get("aux"):
             continue
         nm = (r.get("new_name") or "").strip()
-        if nm and name_count.get(nm, 0) > 1:
+        if nm and name_count.get(((r.get("target_savepath") or ""), nm), 0) > 1:
             r["collision"] = True
             r["default_selected"] = False
             if r.get("status") in ("new", "dup_episode", "unmatched"):
