@@ -50,7 +50,7 @@
             <h6 class="sidebar-heading px-3 mt-4 mb-1 text-muted">dashboard</h6>
             <li class="nav-item">
               <a class="nav-link" href="/logout">
-                <i class="bi bi-box-arrow-right"></i></i> 退出
+                <i class="bi bi-box-arrow-right"></i> 退出
               </a>
             </li>
           </ul>
@@ -327,6 +327,26 @@
                 <small class="text-muted">测试用的是已保存的配置，改动后请先保存（Ctrl+S）再测试。</small>
               </div>
             </div>
+            <div class="form-group row">
+              <label class="col-sm-2 col-form-label">类型目录</label>
+              <div class="col-sm-10">
+                <div class="form-row">
+                  <div class="col-12 col-sm-6 col-lg-4 mb-1" v-for="t in aiCategoryOptions" :key="t">
+                    <div class="input-group input-group-sm">
+                      <div class="input-group-prepend">
+                        <span class="input-group-text" style="min-width:58px">{{ t }}</span>
+                      </div>
+                      <input type="text" class="form-control" v-model="formData.ai.media_roots[t]"
+                             :placeholder="'/0-影音/' + t">
+                    </div>
+                  </div>
+                </div>
+                <small class="text-muted">
+                  分析链接后按类型到对应目录下找同名文件夹：<b>找到就存进去</b>，找不到就新建（界面会明确标注「将新建」）；
+                  分季时在剧集文件夹下再套一层 <code>S0X</code>。留空则自动按现有任务的保存路径推断。
+                </small>
+              </div>
+            </div>
 
           </div>
 
@@ -579,14 +599,15 @@
                 已用它的保存路径与命名规则作为默认值。
               </div>
 
+              <div class="table-responsive">
               <table class="table table-sm table-hover">
                 <thead>
                   <tr>
-                    <th style="width:64px">匹配度</th>
+                    <th style="width:56px">匹配度</th>
                     <th>资源名称</th>
-                    <th style="width:120px">来源</th>
-                    <th style="width:150px">更新时间</th>
-                    <th style="width:100px">操作</th>
+                    <th class="d-none d-md-table-cell" style="width:120px">来源</th>
+                    <th class="d-none d-md-table-cell" style="width:150px">更新时间</th>
+                    <th style="width:96px">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -597,40 +618,86 @@
                       </span>
                     </td>
                     <td>
-                      <div>{{ cand.taskname }}</div>
+                      <div class="text-break">{{ cand.taskname }}</div>
                       <small class="text-muted">{{ cand.reason }}</small>
+                      <small class="text-muted d-block d-md-none">
+                        {{ cand.source }}<span v-if="cand.channel"> / {{ cand.channel }}</span>
+                        <span v-if="cand.datetime"> · {{ cand.datetime }}</span>
+                      </small>
                     </td>
-                    <td><small>{{ cand.source }}<span v-if="cand.channel"> / {{ cand.channel }}</span></small></td>
-                    <td><small>{{ cand.datetime }}</small></td>
+                    <td class="d-none d-md-table-cell"><small>{{ cand.source }}<span v-if="cand.channel"> / {{ cand.channel }}</span></small></td>
+                    <td class="d-none d-md-table-cell"><small>{{ cand.datetime }}</small></td>
                     <td>
                       <button class="btn btn-sm btn-outline-primary" type="button" @click="aiSelectLink(cand)">
-                        分析此链接
+                        分析
                       </button>
                     </td>
                   </tr>
                 </tbody>
               </table>
+              </div>
             </div>
 
             <!-- 步骤3：分析结果 + 规则编辑 -->
             <div v-if="aiAnalysis">
               <hr>
               <div class="form-row">
-                <div class="col-md-6">
-                  <div class="form-group row mb-2">
-                    <label class="col-sm-3 col-form-label">剧名</label>
-                    <div class="col-sm-9">
-                      <input type="text" class="form-control form-control-sm" v-model="aiForm.taskname">
-                    </div>
+                <div class="col-12 col-md-4">
+                  <div class="form-group mb-2">
+                    <label class="small mb-0">剧名（用于重命名）</label>
+                    <input type="text" class="form-control form-control-sm" v-model="aiForm.taskname"
+                           @change="aiResolvePath()">
                   </div>
                 </div>
-                <div class="col-md-6">
-                  <div class="form-group row mb-2">
-                    <label class="col-sm-3 col-form-label">入库目录</label>
-                    <div class="col-sm-9">
-                      <input type="text" class="form-control form-control-sm" v-model="aiForm.savepath">
-                    </div>
+                <div class="col-6 col-md-2">
+                  <div class="form-group mb-2">
+                    <label class="small mb-0">类型</label>
+                    <select class="form-control form-control-sm" v-model="aiForm.category" @change="aiResolvePath()">
+                      <option v-for="t in aiCategoryOptions" :key="t" :value="t">{{ t }}</option>
+                    </select>
                   </div>
+                </div>
+                <div class="col-6 col-md-2">
+                  <div class="form-group mb-2">
+                    <label class="small mb-0">季号</label>
+                    <input type="number" min="1" class="form-control form-control-sm" v-model.number="aiForm.season"
+                           @change="aiResolvePath()" placeholder="不分季留空">
+                  </div>
+                </div>
+                <div class="col-12 col-md-4">
+                  <div class="form-group mb-2">
+                    <label class="small mb-0">入库位置</label>
+                    <input type="text" class="form-control form-control-sm" v-model="aiForm.savepath">
+                  </div>
+                </div>
+              </div>
+
+              <!-- 目标文件夹判定：命中已有文件夹，还是需要新建（分季会补一层 S0X） -->
+              <div v-if="aiResolved" class="alert py-2 small mb-2"
+                   :class="(aiResolved.create_dirs || []).length ? 'alert-info' : 'alert-success'">
+                <i class="bi mr-1" :class="(aiResolved.create_dirs || []).length ? 'bi-folder-plus' : 'bi-folder-check'"></i>
+                <b>{{ (aiResolved.create_dirs || []).length ? '将新建文件夹' : '存入已有文件夹' }}</b>
+                <span class="badge badge-light ml-1">{{ aiResolved.category }}</span>
+                <span v-if="aiResolved.category_source === 'ai'" class="badge badge-info ml-1">AI 判定类型</span>
+                <span v-else-if="aiResolved.category_source === 'existing_folder'" class="badge badge-info ml-1">按库内目录判定</span>
+                <span v-else-if="aiResolved.category_source === 'default'" class="badge badge-warning ml-1">默认类型，请确认</span>
+                <div class="mt-1 text-break"><code>{{ aiResolved.savepath }}</code></div>
+                <div v-if="(aiResolved.create_dirs || []).length" class="mt-1 text-muted">
+                  新建层级：
+                  <span v-for="(d, di) in aiResolved.create_dirs" :key="di"><code>{{ d }}</code><span
+                      v-if="di < aiResolved.create_dirs.length - 1"> → </span></span>
+                  <span v-if="aiResolved.matched_folder">（剧集文件夹已在库中，只需补上面这些）</span>
+                </div>
+                <div v-else-if="aiResolved.matched_folder" class="mt-1 text-muted">
+                  命中库内目录「{{ aiResolved.matched_folder }}」（{{ aiResolved.match_note }}）
+                  <span v-if="aiResolved.season_dir">
+                    · 其下再加一层 {{ aiResolved.season_dir }}{{ aiResolved.season_exists ? '（已存在）' : '（将新建）' }}
+                  </span>
+                </div>
+                <div v-if="aiBaselinePath" class="mt-1">
+                  已有任务用的是 <code class="text-break">{{ aiBaselinePath }}</code>
+                  <button class="btn btn-sm btn-link py-0" type="button"
+                          @click="aiForm.savepath = aiBaselinePath">改用这个</button>
                 </div>
               </div>
 
@@ -690,6 +757,33 @@
                 <button class="btn btn-sm btn-link py-0" type="button" @click="aiAdoptSuggestion()">采纳并重新分析</button>
               </div>
 
+              <!-- 手机端：卡片式逐条勾选/改名，避免四列表格横向挤压 -->
+              <div class="d-md-none">
+                <div class="custom-control custom-checkbox mb-2">
+                  <input type="checkbox" class="custom-control-input" id="aiSelectAllMobile"
+                         :checked="aiAllSelected()" @change="aiToggleAll($event)">
+                  <label class="custom-control-label small" for="aiSelectAllMobile">全选可转存项</label>
+                </div>
+                <div v-for="(row, ri) in aiAnalysis.rows" :key="'m' + ri"
+                     class="border rounded p-2 mb-2"
+                     :class="{'border-success': row.status === 'new', 'border-warning': row.status === 'dup_episode'}">
+                  <div class="d-flex align-items-start">
+                    <input type="checkbox" class="mr-2 mt-1" style="width:22px;height:22px;flex:0 0 auto"
+                           v-model="row.selected"
+                           :disabled="row.status === 'exists' || row.status === 'rule_error'">
+                    <div class="flex-fill" style="min-width:0">
+                      <div class="small font-weight-bold">{{ row.status_text }}</div>
+                      <div class="small text-muted text-break">{{ row.file_name }}</div>
+                      <input type="text" class="form-control form-control-sm mt-1" v-model="row.new_name"
+                             :disabled="row.dir"
+                             :title="row.dir ? '文件夹整体转存，不重命名' : '可直接改成你想要的文件名'">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 桌面端：表格 -->
+              <div class="d-none d-md-block table-responsive">
               <table class="table table-sm table-hover">
                 <thead>
                   <tr>
@@ -718,16 +812,17 @@
                   </tr>
                 </tbody>
               </table>
+              </div>
 
-              <div class="mb-2">
-                <b>已选 {{ aiSelectedCount() }} 项</b>
-                <button class="btn btn-success ml-2" type="button"
+              <div class="mb-2 d-flex flex-wrap align-items-center">
+                <b class="mr-2">已选 {{ aiSelectedCount() }} 项</b>
+                <button class="btn btn-success mr-2 mb-1" type="button"
                         :disabled="aiCommitting || aiSelectedCount() === 0" @click="aiCommit()">
                   <i v-if="aiCommitting" class="spinner-border spinner-border-sm mr-1"></i>
                   <i v-else class="bi bi-box-arrow-in-down mr-1"></i>确认入库
                 </button>
-                <button class="btn btn-outline-secondary ml-2" type="button" @click="aiReset()">清空重来</button>
-                <small class="text-muted ml-2">按上表文件名重命名后转存（一次性，不创建任务）</small>
+                <button class="btn btn-outline-secondary mr-2 mb-1" type="button" @click="aiReset()">清空重来</button>
+                <small class="text-muted d-none d-md-inline">按上表文件名重命名后转存（一次性，不创建任务）</small>
               </div>
 
               <div v-if="aiCommitLog" class="card mb-3">
@@ -833,6 +928,7 @@
                 </ol>
               </nav>
               <!-- 文件列表 -->
+              <div class="table-responsive">
               <table class="table table-hover table-sm">
                 <thead>
                   <tr>
@@ -876,6 +972,7 @@
                   </tr>
                 </tbody>
               </table>
+              </div>
             </div>
           </div>
           <div class="modal-footer" v-if="fileSelect.selectDir && !fileSelect.previewRegex">
@@ -981,7 +1078,10 @@
           taskname: "",
           savepath: "/",
           pattern: "$TV_MAGIC",
-          replace: ""
+          replace: "",
+          // 媒体类型与季号：用于自动定位「类型目录 / 剧名文件夹 / S0X」
+          category: "",
+          season: ""
         },
         aiSearching: false,
         aiAnalyzing: false,
@@ -989,6 +1089,9 @@
         aiTesting: false,
         aiResult: null,
         aiAnalysis: null,
+        aiResolved: null,
+        aiBaselinePath: '',
+        aiCategoryOptions: ['电视剧', '电影', '动漫', '综艺', '纪录片'],
         aiCommitLog: "",
         aiError: "",
         aiStatus: {},
@@ -1055,6 +1158,32 @@
             if (response.data.success) this.aiStatus = response.data.data;
           }).catch(() => { });
         },
+        // 应用后端解析出的入库位置（类型 / 已有文件夹 / 是否新建 / S0X）
+        aiApplyResolved(resolved) {
+          this.aiResolved = resolved;
+          if (resolved.category) this.aiForm.category = resolved.category;
+          if (resolved.category_options && resolved.category_options.length) {
+            this.aiCategoryOptions = resolved.category_options;
+          }
+          this.aiForm.season = (resolved.season === null || resolved.season === undefined) ? '' : resolved.season;
+          if (resolved.savepath) this.aiForm.savepath = resolved.savepath;
+        },
+        // 类型或季号变化后重新解析入库位置
+        aiResolvePath() {
+          const title = (this.aiForm.taskname || '').trim() || (this.aiForm.keyword || '').trim();
+          if (!title) return;
+          const intent = (this.aiResult && this.aiResult.intent) || {};
+          axios.post('/ai/resolve_path', {
+            title: title,
+            aliases: intent.aliases || [],
+            season: this.aiForm.season === '' ? null : this.aiForm.season,
+            category: this.aiForm.category || ''
+          }).then(response => {
+            const res = response.data;
+            if (res.success) this.aiApplyResolved(res.data);
+            else this.aiError = res.message || '解析入库路径失败';
+          }).catch(error => { this.aiError = '解析入库路径失败：' + error; });
+        },
         aiSearch() {
           const keyword = (this.aiForm.keyword || '').trim();
           if (!keyword) { this.showToast('请输入剧集名称', 'warning'); return; }
@@ -1074,13 +1203,22 @@
                 return;
               }
               const base = res.data.baseline;
+              this.aiForm.taskname = (base && base.taskname) || res.data.intent.title || keyword;
               if (base) {
-                this.aiForm.taskname = base.taskname || res.data.intent.title;
-                this.aiForm.savepath = base.savepath || '/';
                 if (base.pattern) this.aiForm.pattern = base.pattern;
                 if (base.replace !== undefined) this.aiForm.replace = base.replace;
+              }
+              const resolved = res.data.resolved;
+              if (resolved && resolved.savepath) {
+                // 自动判定类型 → 在对应类型目录下找已有文件夹 → 没找到就标明将新建
+                this.aiApplyResolved(resolved);
+                // 已有任务用的是另一个位置时，提示出来让用户决定
+                this.aiBaselinePath = (base && base.savepath && base.savepath !== resolved.savepath)
+                  ? base.savepath : '';
               } else {
-                this.aiForm.taskname = res.data.intent.title || keyword;
+                this.aiResolved = null;
+                this.aiBaselinePath = '';
+                this.aiForm.savepath = (base && base.savepath) || '/';
               }
             })
             .catch(error => { this.aiError = '搜索请求失败：' + error; })
@@ -1183,6 +1321,8 @@
         aiReset() {
           this.aiResult = null;
           this.aiAnalysis = null;
+          this.aiResolved = null;
+          this.aiBaselinePath = '';
           this.aiCommitLog = '';
           this.aiError = '';
           this.aiForm.shareurl = '';
@@ -1265,8 +1405,16 @@
                 base_url: "",
                 api_key: "",
                 model: "",
-                timeout: 60
+                timeout: 60,
+                media_roots: {}
               }, config_data.ai || {});
+              if (!config_data.ai.media_roots || typeof config_data.ai.media_roots !== 'object') {
+                config_data.ai.media_roots = {};
+              }
+              // 类型目录的键要在对象变成响应式之前建好，否则输入框绑不上
+              this.aiCategoryOptions.forEach(function (t) {
+                if (config_data.ai.media_roots[t] === undefined) config_data.ai.media_roots[t] = '';
+              });
               // 手写配置里 enable 可能是 JSON 布尔，统一成字符串，
               // 否则复选框的 true-value="true" 比较会显示成未勾选
               config_data.ai.enable = (config_data.ai.enable === true || config_data.ai.enable === "true") ? "true" : "false";
