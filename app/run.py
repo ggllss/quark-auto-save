@@ -1468,11 +1468,25 @@ def ai_analyze():
             if r.get("status") in ("new", "dup_episode", "unmatched"):
                 r["status_text"] = r["status_text"] + "（与其他文件重名）"
 
-    # 排序：能直接入库的排前面，「不匹配规则」「已在库」这些放到后面
-    # （稳定排序，同状态内保持分享里的原始顺序，也就是集数顺序）
+    # 排序：先按状态分组（能直接入库的排前面，「不匹配规则」「已在库」放后面），
+    # 组内按文件名里的日期倒序——最新的集数排最前面，方便直接勾新出的那几集
     _status_order = {"new": 0, "dup_episode": 1, "folder": 2, "unmatched": 3,
                      "exists": 4, "rule_error": 5}
-    rows.sort(key=lambda r: _status_order.get(r.get("status"), 9))
+
+    def _date_key(row):
+        """文件名里的日期（YYYYMMDD 整数），没有则 0"""
+        text = tmdb.name_date(row.get("file_name") or "")
+        return int(text.replace("-", "")) if text else 0
+
+    for _r in rows:
+        _r["date_key"] = _date_key(_r)
+    rows.sort(
+        key=lambda r: (
+            _status_order.get(r.get("status"), 9),
+            -r["date_key"],                      # 新的在前
+            -(r.get("updated_at") or 0),          # 同日期按文件时间兜底
+        )
+    )
 
     stats = {
         "total": len(rows),

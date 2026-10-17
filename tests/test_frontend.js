@@ -563,6 +563,20 @@ async function testMobileInteraction() {
     !!del && del[2].file_names[0] === 'E01.mp4', del && del[2]);
   check('删除后自动刷新分析', calls.some(c => c[1] === '/ai/analyze'));
 
+  // 切换链接要立刻清掉上一个链接的结果，避免等待期间看到旧数据
+  ctx.aiResult = { candidates: [
+    { taskname: 'A', shareurl: 'https://pan.quark.cn/s/a', score: 90 },
+    { taskname: 'B', shareurl: 'https://pan.quark.cn/s/b', score: 80 },
+  ] };
+  ctx.aiAnalysis = { rows: [{ status: 'new', file_name: 'old.mp4' }], stats: {}, rule: {} };
+  ctx.aiCommitLog = 'old log';
+  global.__nextResponse = { data: { success: false, message: 'x' } };
+  ctx.aiSelectIndex(1);
+  check('切换链接后立刻清空上一个链接的分析结果', ctx.aiAnalysis === null, ctx.aiAnalysis);
+  check('切换链接后清空上一个链接的入库日志', ctx.aiCommitLog === '');
+  check('切换链接后筛选条件复位', ctx.aiFilter === 'all', ctx.aiFilter);
+  await tick();
+
   check('列表里有单条删除按钮', html.includes('aiDeleteRow(row)'));
   check('默认进入 AI 追剧页', html.includes("activeTab: 'ai'"));
   check('分析计时用 setTimeout 链（请求结束即停，不会泄漏）',

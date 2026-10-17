@@ -1468,6 +1468,11 @@
           if (!this.aiForm.taskname) this.aiForm.taskname = cand.taskname || this.aiForm.keyword;
           // 收起候选列表：几十条候选会把分析结果顶到很远，手机上尤其难受
           this.aiCandidatesCollapsed = true;
+          // 切到新链接时立刻清掉上一个链接的分析结果，
+          // 否则等待期间看到的还是上一个分享的文件，很容易误判
+          this.aiAnalysis = null;
+          this.aiCommitLog = '';
+          this.aiFilter = 'all';
           this.aiAnalyze();
         },
         aiSelectLink(cand) {
