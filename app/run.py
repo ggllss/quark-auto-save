@@ -730,9 +730,12 @@ def ai_search():
         pool, from_cache = cached, True
     else:
         from_cache = False
+        t0 = time.time()
         pool = gather()
-        # 公共搜索源偶发限流/超时会返回空列表，空结果时补一次
-        if not pool and queries:
+        elapsed = time.time() - t0
+        # 公共搜索源偶发限流/超时会返回空列表，空结果时补一次。
+        # 但如果第一轮本身就很慢（说明源在硬扛而不是被限流），再等一轮只会更久，直接放弃。
+        if not pool and queries and elapsed < 10:
             retried = True
             pool = gather()
         _search_cache_put(cache_key, pool)
