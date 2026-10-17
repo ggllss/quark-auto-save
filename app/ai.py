@@ -330,7 +330,9 @@ def split_season(name):
     if not season:
         return name, None
     stem = name[: m.start()].strip(" ._-·")
-    if len(normalize_name(stem)) < 2:
+    # 裸季号目录（S03 / 第四季）主体为空是正常的；但只剩一两个字的主体
+    # 说明这个数字多半不是季标记（如「五哈2」里的 2 也可能是季号，保守起见仍按季号处理）
+    if stem and len(normalize_name(stem)) < 2:
         return name, None
     return stem, season
 
@@ -365,7 +367,7 @@ def match_folder(title, aliases, dir_names, threshold=0.75, season=None):
                 score, way = 1.0, how + "完全一致"
             elif key == cand_stem:
                 score, way = 0.95, how + "一致（目录名带季号）"
-            elif cand_stem.startswith(key) or key.startswith(cand_stem):
+            elif cand_stem and (cand_stem.startswith(key) or key.startswith(cand_stem)):
                 ratio = min(len(key), len(cand_stem)) / max(len(key), len(cand_stem))
                 score, way = 0.8 * ratio, how + "前缀匹配"
             elif key in cand_full or cand_full in key:

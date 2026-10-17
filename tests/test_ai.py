@@ -250,7 +250,7 @@ def test_folder_match():
         ("背着善宰跑", ("背着善宰跑", None)),
         ("现在就出发", ("现在就出发", None)),
         ("五哈", ("五哈", None)),
-        ("第二季", ("第二季", None)),
+        ("第二季", ("", 2)),   # 裸季号目录
     ]:
         got = ai.split_season(raw)
         check("%s → %r" % (raw, want), got == want, got)
@@ -366,6 +366,56 @@ def test_share_expand():
           (len(items3), trunc3))
 
 
+def test_season_autodetect():
+    print("【12】季号自动识别（只输剧名也能定到当前季）")
+    import run
+
+    def fake_list(path):
+        p = path.rstrip("/")
+        if p == "/0-影音/综艺":
+            return [{"file_name": "现在就出发", "dir": True},
+                    {"file_name": "五哈", "dir": True}]
+        if p == "/0-影音/综艺/现在就出发":
+            return [{"file_name": "S03", "dir": True},
+                    {"file_name": "S04", "dir": True},
+                    {"file_name": "E01.mkv", "dir": False}]
+        return None
+
+    run.config_data = {"ai": {"media_roots": {"综艺": "/0-影音/综艺"}}, "tasklist": []}
+    orig = run._list_dir_items
+    run._list_dir_items = fake_list
+    try:
+        r = run._resolve_media_path("现在就出发", [], None, "")
+        check("只给剧名也能识别到第 4 季", r["season"] == 4, r["season"])
+        check("季号来源标记为库内目录", r["season_source"] == "library", r["season_source"])
+        check("入库路径自动带上 S04",
+              r["savepath"] == "/0-影音/综艺/现在就出发/S04", r["savepath"])
+        check("命中已有剧集文件夹", r["folder_exists"] is True)
+
+        r2 = run._resolve_media_path("现在就出发", [], 3, "")
+        check("显式指定季号时以指定为准",
+              r2["season"] == 3 and r2["season_source"] == "keyword", r2["season"])
+        check("显式季号生成 S03", r2["savepath"].endswith("/S03"), r2["savepath"])
+
+        def fake_list2(path):
+            p = path.rstrip("/")
+            if p == "/0-影音/综艺":
+                return [{"file_name": "中餐厅S10", "dir": True}]
+            if p == "/0-影音/综艺/中餐厅S10":
+                return [{"file_name": "E01.mkv", "dir": False}]
+            return None
+
+        run._list_dir_items = fake_list2
+        r3 = run._resolve_media_path("中餐厅", [], None, "")
+        check("目录名自带季号时识别为该季",
+              r3["season"] == 10 and r3["season_source"] == "folder_name",
+              (r3["season"], r3["season_source"]))
+        check("不会重复套一层 S10",
+              r3["season_dir"] == "" and r3["savepath"].endswith("中餐厅S10"), r3["savepath"])
+    finally:
+        run._list_dir_items = orig
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -390,6 +440,7 @@ def main():
     test_folder_match()
     test_search_filter()
     test_share_expand()
+    test_season_autodetect()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0

@@ -653,13 +653,27 @@
                 <span v-if="aiResult.from_cache" class="badge badge-light ml-1">来自缓存</span>
               </div>
 
-              <!-- 选定链接后收起候选列表：几十条候选会把分析结果顶到很下面 -->
-              <div v-if="aiCandidatesCollapsed && aiSelectedCandidate"
-                   class="alert alert-light py-2 small d-flex align-items-center mb-2">
-                <i class="bi bi-check2-circle text-success mr-1"></i>
-                <span class="flex-fill text-break">已选资源：{{ aiSelectedCandidate.taskname }}</span>
-                <button class="btn btn-sm btn-outline-secondary ml-2 flex-shrink-0" type="button"
-                        @click="aiCandidatesCollapsed = false">重新选择</button>
+              <!-- 选定链接后收起候选列表，并提供上一个/下一个直接切换 -->
+              <div v-if="aiCandidatesCollapsed && aiSelectedCandidate" class="card mb-2">
+                <div class="card-body py-2 d-flex align-items-center">
+                  <button class="btn btn-sm btn-outline-primary flex-shrink-0" type="button"
+                          :disabled="aiCandidateIndex <= 0" @click="aiPrevLink()">
+                    <i class="bi bi-chevron-left"></i><span class="d-none d-sm-inline"> 上一个</span>
+                  </button>
+                  <div class="flex-fill text-center px-2" style="min-width:0">
+                    <div class="small text-truncate">{{ aiSelectedCandidate.taskname }}</div>
+                    <div class="text-muted" style="font-size:11px">
+                      第 {{ aiCandidateIndex + 1 }} / {{ (aiResult.candidates || []).length }} 条
+                      · {{ Math.round(aiSelectedCandidate.score || 0) }} 分
+                      · <a href="#" @click.prevent="aiCandidatesCollapsed = false">展开列表</a>
+                    </div>
+                  </div>
+                  <button class="btn btn-sm btn-outline-primary flex-shrink-0" type="button"
+                          :disabled="aiCandidateIndex >= (aiResult.candidates || []).length - 1"
+                          @click="aiNextLink()">
+                    <span class="d-none d-sm-inline">下一个 </span><i class="bi bi-chevron-right"></i>
+                  </button>
+                </div>
               </div>
               <div v-else class="table-responsive">
               <table class="table table-sm table-hover">
@@ -714,7 +728,9 @@
                   </span>
                   <code>{{ aiForm.savepath }}</code>
                   <div v-if="aiSeasonDir()" class="text-muted mt-1" style="font-size:11px">
-                    子目录 <code>{{ aiSeasonDir() }}</code> 就是「第 {{ aiForm.season }} 季」的意思
+                    子目录 <code>{{ aiSeasonDir() }}</code> = 第 {{ aiForm.season }} 季
+                    <span v-if="aiResolved && aiResolved.season_source === 'library'">（按库里已有的分季目录自动识别）</span>
+                    <span v-else-if="aiResolved && aiResolved.season_source === 'folder_name'">（库内目录名自带季号）</span>
                   </div>
                 </div>
                 <button class="btn btn-sm btn-outline-secondary ml-2 flex-shrink-0 d-md-none" type="button"
@@ -834,8 +850,11 @@
                         :class="aiFilter === 'dup' ? 'btn-primary' : 'btn-outline-secondary'"
                         @click="aiFilter = 'dup'">疑似重复 {{ aiFilterCount('dup') }}</button>
                 <button class="btn btn-sm mr-1 flex-shrink-0" type="button"
+                        :class="aiFilter === 'unmatched' ? 'btn-primary' : 'btn-outline-secondary'"
+                        @click="aiFilter = 'unmatched'">不匹配 {{ aiFilterCount('unmatched') }}</button>
+                <button class="btn btn-sm mr-1 flex-shrink-0" type="button"
                         :class="aiFilter === 'exists' ? 'btn-primary' : 'btn-outline-secondary'"
-                        @click="aiFilter = 'exists'">不可转存 {{ aiFilterCount('exists') }}</button>
+                        @click="aiFilter = 'exists'">已在库 {{ aiFilterCount('exists') }}</button>
                 <span class="flex-fill"></span>
                 <button class="btn btn-sm btn-outline-success d-md-none flex-shrink-0" type="button"
                         @click="aiSelectOnlyNew()">只选可新增</button>
@@ -875,7 +894,7 @@
                      :class="{'border-success': row.status === 'new', 'border-warning': row.status === 'dup_episode'}">
                   <div class="d-flex align-items-start">
                     <input type="checkbox" class="mr-2 mt-1 ai-row-check" style="flex:0 0 auto"
-                           v-model="row.selected" :disabled="!aiSelectable(row)">
+                           v-model="row.selected">
                     <div class="flex-fill" style="min-width:0">
                       <div class="small font-weight-bold">{{ row.status_text }}</div>
                       <div class="small text-muted text-break">
@@ -907,7 +926,7 @@
                   <tr v-for="(row, ri) in aiFilteredRows()" :key="ri"
                       :class="{'table-success': row.status === 'new', 'table-warning': row.status === 'dup_episode'}">
                     <td>
-                      <input type="checkbox" v-model="row.selected" :disabled="!aiSelectable(row)">
+                      <input type="checkbox" v-model="row.selected">
                     </td>
                     <td><small>{{ row.status_text }}</small></td>
                     <td>
@@ -1217,6 +1236,7 @@
         aiAnalysis: null,
         aiResolved: null,
         aiSelectedCandidate: null,
+        aiCandidateIndex: -1,
         aiBaselinePath: '',
         aiCategoryOptions: ['电视剧', '电影', '动漫', '综艺', '纪录片'],
         // 手机端交互状态：设置折叠、候选列表收起、状态筛选
@@ -1327,6 +1347,9 @@
           this.aiResult = null;
           this.aiAnalysis = null;
           this.aiCommitLog = '';
+          this.aiSelectedCandidate = null;
+          this.aiCandidateIndex = -1;
+          this.aiCandidatesCollapsed = false;
           // 公共搜索源慢的时候要等一两分钟，给个秒数让用户知道没卡死
           this.aiSearchElapsed = 0;
           if (this.aiSearchTimer) clearInterval(this.aiSearchTimer);
@@ -1366,13 +1389,31 @@
               if (this.aiSearchTimer) { clearInterval(this.aiSearchTimer); this.aiSearchTimer = null; }
             });
         },
-        aiSelectLink(cand) {
-          this.aiForm.shareurl = cand.shareurl;
+        // 按序号选候选链接：上一个/下一个直接切换，不用回头重新找
+        aiSelectIndex(idx) {
+          const list = (this.aiResult && this.aiResult.candidates) || [];
+          if (!list.length) return;
+          const i = Math.max(0, Math.min(list.length - 1, idx));
+          const cand = list[i];
+          this.aiCandidateIndex = i;
           this.aiSelectedCandidate = cand;
+          this.aiForm.shareurl = cand.shareurl;
           if (!this.aiForm.taskname) this.aiForm.taskname = cand.taskname || this.aiForm.keyword;
           // 收起候选列表：几十条候选会把分析结果顶到很远，手机上尤其难受
           this.aiCandidatesCollapsed = true;
           this.aiAnalyze();
+        },
+        aiSelectLink(cand) {
+          const list = (this.aiResult && this.aiResult.candidates) || [];
+          const i = list.indexOf(cand);
+          this.aiSelectIndex(i >= 0 ? i : 0);
+        },
+        aiPrevLink() {
+          if (this.aiCandidateIndex > 0) this.aiSelectIndex(this.aiCandidateIndex - 1);
+        },
+        aiNextLink() {
+          const total = ((this.aiResult && this.aiResult.candidates) || []).length;
+          if (this.aiCandidateIndex < total - 1) this.aiSelectIndex(this.aiCandidateIndex + 1);
         },
         aiScrollTo(id) {
           if (typeof document === 'undefined' || !document.getElementById) return;
@@ -1444,24 +1485,30 @@
           const preset = (this.formData.magic_regex || {})[this.aiForm.pattern];
           return preset ? preset.replace : '留空则沿用预设规则的替换模板';
         },
-        // 可转存的条目：已在库、规则无效、不匹配规则的文件勾了也不会被转存
-        // （不匹配规则会被引擎第一道闸门直接跳过），所以一律不允许勾选
+        // 全选时跳过「已在库」的条目（它们勾了通常也不会被转存），
+        // 但界面上每一行都允许手动勾选——想重新导入同名文件时用得着
         aiSelectable(row) {
-          return row.status !== 'exists' && row.status !== 'rule_error' && row.status !== 'unmatched';
+          return row.status !== 'exists';
         },
         // 状态筛选后可见的行。勾选与全选只作用于可见行，所见即所得
         aiFilteredRows() {
           const rows = (this.aiAnalysis && this.aiAnalysis.rows) || [];
           if (this.aiFilter === 'new') return rows.filter(r => r.status === 'new');
           if (this.aiFilter === 'dup') return rows.filter(r => r.status === 'dup_episode');
-          if (this.aiFilter === 'exists') return rows.filter(r => !this.aiSelectable(r));
+          if (this.aiFilter === 'unmatched') {
+            return rows.filter(r => r.status === 'unmatched' || r.status === 'rule_error');
+          }
+          if (this.aiFilter === 'exists') return rows.filter(r => r.status === 'exists');
           return rows;
         },
         aiFilterCount(key) {
           const rows = (this.aiAnalysis && this.aiAnalysis.rows) || [];
           if (key === 'new') return rows.filter(r => r.status === 'new').length;
           if (key === 'dup') return rows.filter(r => r.status === 'dup_episode').length;
-          if (key === 'exists') return rows.filter(r => !this.aiSelectable(r)).length;
+          if (key === 'unmatched') {
+            return rows.filter(r => r.status === 'unmatched' || r.status === 'rule_error').length;
+          }
+          if (key === 'exists') return rows.filter(r => r.status === 'exists').length;
           return rows.length;
         },
         aiAllSelected() {
@@ -1522,6 +1569,7 @@
           this.aiResolved = null;
           this.aiBaselinePath = '';
           this.aiSelectedCandidate = null;
+          this.aiCandidateIndex = -1;
           this.aiCandidatesCollapsed = false;
           this.aiSettingsOpen = false;
           this.aiFilter = 'all';

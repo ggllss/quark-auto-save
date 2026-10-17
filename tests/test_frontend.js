@@ -401,9 +401,18 @@ async function testMobileInteraction() {
   check('「疑似重复」只返回疑似重复行',
     ctx.aiFilteredRows().length === 1 && ctx.aiFilteredRows()[0].status === 'dup_episode');
   ctx.aiFilter = 'exists';
-  check('「已在库」含不可转存项（含不匹配规则）', ctx.aiFilteredRows().length === 2);
+  check('「已在库」只返回已在库行',
+    ctx.aiFilteredRows().length === 1 && ctx.aiFilteredRows()[0].status === 'exists');
+  ctx.aiFilter = 'unmatched';
+  check('「不匹配」返回不匹配/规则无效行', ctx.aiFilteredRows().length === 1);
   check('筛选按钮上的计数正确',
-    ctx.aiFilterCount('new') === 1 && ctx.aiFilterCount('exists') === 2 && ctx.aiFilterCount('all') === 4);
+    ctx.aiFilterCount('new') === 1 && ctx.aiFilterCount('exists') === 1
+    && ctx.aiFilterCount('unmatched') === 1 && ctx.aiFilterCount('all') === 4);
+
+  // 第 1 条要求：没有「不可转存」这回事，不匹配的也能手动勾
+  check('不匹配规则的行可以手动勾选', ctx.aiSelectable({ status: 'unmatched' }) === true);
+  check('规则无效的行也可以手动勾选', ctx.aiSelectable({ status: 'rule_error' }) === true);
+  check('已在库的行不参与全选', ctx.aiSelectable({ status: 'exists' }) === false);
 
   // 全选只作用于当前筛选可见的行（所见即所得）
   ctx.aiFilter = 'dup';
@@ -421,16 +430,44 @@ async function testMobileInteraction() {
     ctx.aiAnalysis.rows.filter(r => r.selected).length === 1 && ctx.aiAnalysis.rows[0].selected === true);
 
   // 选定链接后收起候选列表，避免把结果顶到很远
+  ctx.aiResult = {
+    candidates: [
+      { taskname: '资源A', shareurl: 'https://pan.quark.cn/s/aaa', score: 90 },
+      { taskname: '资源B', shareurl: 'https://pan.quark.cn/s/bbb', score: 80 },
+      { taskname: '资源C', shareurl: 'https://pan.quark.cn/s/ccc', score: 70 }
+    ]
+  };
   ctx.aiCandidatesCollapsed = false;
   ctx.aiSelectedCandidate = null;
+  ctx.aiCandidateIndex = -1;
   ctx.aiForm.taskname = 'X';
   global.__nextResponse = {
     data: { success: true, data: { rows: [], stats: {}, rule: { valid: true }, dir_files: [] } }
   };
-  ctx.aiSelectLink({ taskname: '资源A', shareurl: 'https://pan.quark.cn/s/aaa' });
+  ctx.aiSelectLink(ctx.aiResult.candidates[0]);
   check('选定链接后自动收起候选列表', ctx.aiCandidatesCollapsed === true);
   check('记住已选候选用于摘要展示',
     !!ctx.aiSelectedCandidate && ctx.aiSelectedCandidate.taskname === '资源A');
+  check('记住当前是第几条', ctx.aiCandidateIndex === 0);
+  await tick();
+
+  // 第 3 条要求：直接用上一个/下一个切换链接，不用回头重新选
+  ctx.aiNextLink();
+  check('下一个切到第 2 条',
+    ctx.aiSelectedCandidate.taskname === '资源B' && ctx.aiCandidateIndex === 1);
+  check('切换链接会更新分享地址', ctx.aiForm.shareurl === 'https://pan.quark.cn/s/bbb');
+  await tick();
+  ctx.aiPrevLink();
+  check('上一个切回第 1 条',
+    ctx.aiSelectedCandidate.taskname === '资源A' && ctx.aiCandidateIndex === 0);
+  await tick();
+  ctx.aiPrevLink();
+  check('第 1 条时「上一个」不越界', ctx.aiCandidateIndex === 0);
+  ctx.aiSelectIndex(2);
+  check('可以直接跳到第 3 条', ctx.aiSelectedCandidate.taskname === '资源C');
+  await tick();
+  ctx.aiNextLink();
+  check('最后一条时「下一个」不越界', ctx.aiCandidateIndex === 2);
   await tick();
 
   let scrollSafe = true;
@@ -461,7 +498,7 @@ async function testMobileInteraction() {
   check('季号 12 → 目录名 S12', ctx.aiSeasonDir() === 'S12', ctx.aiSeasonDir());
   ctx.aiForm.season = '';
   check('不填季号则无子目录', ctx.aiSeasonDir() === '', ctx.aiSeasonDir());
-  check('页面上解释了 S0X 的含义', html.includes('就是「第 {{ aiForm.season }} 季」的意思'));
+  check('页面上解释了 S0X 的含义', html.includes('= 第 {{ aiForm.season }} 季'));
   check('文件夹行会说明「整包转存、不能单独改名」',
     html.includes('row.dir_hint') && html.includes('{{ row.dir_hint }}'));
 

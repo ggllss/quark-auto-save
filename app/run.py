@@ -561,6 +561,30 @@ def _resolve_media_path(title, aliases=None, season=None, category=""):
         result["note"] = "缺少剧名，无法确定入库目录"
         return result
 
+    # 季号没给时自动推断「现在更新的是第几季」：
+    # ① 命中的目录名本身带季号（中餐厅S10）→ 就是第 10 季
+    # ② 该剧文件夹下已有 S0X 子目录 → 取最大的那个（正在更新的那季）
+    season_source = "keyword" if season else ""
+    if not season and result["folder_exists"]:
+        _stem, folder_season = ai.split_season(folder_name)
+        if folder_season:
+            season, season_source = folder_season, "folder_name"
+        else:
+            try:
+                sub_items = _list_dir_items("/".join([root.rstrip("/"), folder_name])) or []
+                seasons = []
+                for it in sub_items:
+                    if it.get("dir"):
+                        _s, sub_season = ai.split_season(it.get("file_name") or "")
+                        if sub_season:
+                            seasons.append(sub_season)
+                if seasons:
+                    season, season_source = max(seasons), "library"
+            except Exception:
+                pass
+    result["season"] = season
+    result["season_source"] = season_source
+
     # 分季：目录名已经带相同季号就不再套一层，避免出现「中餐厅S09/S09」
     season_dir = ""
     if season:
@@ -1096,6 +1120,12 @@ def ai_analyze():
                     row.update({"status": "new", "status_text": "可新增"})
             row["default_selected"] = row["status"] == "new"
         rows.append(row)
+
+    # 排序：能直接入库的排前面，「不匹配规则」「已在库」这些放到后面
+    # （稳定排序，同状态内保持分享里的原始顺序，也就是集数顺序）
+    _status_order = {"new": 0, "dup_episode": 1, "folder": 2, "unmatched": 3,
+                     "exists": 4, "rule_error": 5}
+    rows.sort(key=lambda r: _status_order.get(r.get("status"), 9))
 
     stats = {
         "total": len(rows),
