@@ -577,6 +577,23 @@ async function testMobileInteraction() {
   check('切换链接后筛选条件复位', ctx.aiFilter === 'all', ctx.aiFilter);
   await tick();
 
+  // 搜索源没收录的分享：可以直接粘贴链接分析
+  check('有「直接粘贴分享链接」入口', html.includes('aiAnalyzeDirect()'));
+  check('手工链接入口绑定 shareurl', /v-model="aiForm.shareurl"/.test(html));
+  const toastMsgs = [];
+  ctx.showToast = function (m) { toastMsgs.push(m); };
+  ctx.aiForm.keyword = '现在就出发';
+  ctx.aiForm.taskname = '';
+  ctx.aiForm.shareurl = 'https://example.com/not-quark';
+  ctx.aiResult = { candidates: [] };
+  ctx.aiAnalyzeDirect();
+  check('非夸克链接会被拒绝', /不是夸克分享链接/.test(toastMsgs.join(' ')), toastMsgs);
+  ctx.aiForm.shareurl = 'https://pan.quark.cn/s/7aa30043484a#/list/share';
+  ctx.aiAnalyzeDirect();
+  check('手工链接会用剧名补齐 taskname', ctx.aiForm.taskname === '现在就出发', ctx.aiForm.taskname);
+  check('手工链接会清掉候选列表（没有搜索态）', ctx.aiResult === null, ctx.aiResult);
+  await tick();
+
   check('列表里有单条删除按钮', html.includes('aiDeleteRow(row)'));
   check('默认进入 AI 追剧页', html.includes("activeTab: 'ai'"));
   check('分析计时用 setTimeout 链（请求结束即停，不会泄漏）',

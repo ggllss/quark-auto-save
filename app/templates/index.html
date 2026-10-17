@@ -611,6 +611,26 @@
                   AI 负责理解剧名、从候选链接里挑最匹配的；
                   <b>哪些集可更新由确定性比对得出</b>（分享文件 × 目标目录已有文件），不靠模型猜。
                 </small>
+                <!-- 公共搜索源没收录的分享（比如别人私发的链接）用这里 -->
+                <div class="mt-2">
+                  <a href="#" class="small" @click.prevent="aiManualOpen = !aiManualOpen">
+                    <i class="bi mr-1" :class="aiManualOpen ? 'bi-chevron-down' : 'bi-chevron-right'"></i>搜不到？直接粘贴分享链接
+                  </a>
+                  <div v-if="aiManualOpen" class="input-group input-group-sm mt-1">
+                    <input type="text" class="form-control" v-model="aiForm.shareurl"
+                           placeholder="https://pan.quark.cn/s/xxxxxxxx"
+                           @keydown.enter.prevent="aiAnalyzeDirect()">
+                    <div class="input-group-append">
+                      <button class="btn btn-outline-primary" type="button"
+                              :disabled="aiAnalyzing" @click="aiAnalyzeDirect()">
+                        <i v-if="aiAnalyzing" class="spinner-border spinner-border-sm mr-1"></i>分析这个链接
+                      </button>
+                    </div>
+                  </div>
+                  <small v-if="aiManualOpen" class="text-muted d-block">
+                    剧名用上面的输入框（用于命名和定位文件夹）。搜索源没收录的分享走这条路。
+                  </small>
+                </div>
                 <small v-if="aiSearching" class="text-info d-block mt-2">
                   <i class="bi bi-hourglass-split mr-1"></i>正在搜索…已等待 <b>{{ aiSearchElapsed }}</b> 秒
                   （公共搜索源较慢时可能需要 1-2 分钟，请勿关闭页面）
@@ -1308,6 +1328,7 @@
         aiFilter: 'all',
         aiScrollTarget: '',
         aiAnalyzeSeq: 0,
+        aiManualOpen: false,
         aiAnalyzeElapsed: 0,
         aiAnalyzeTimer: null,
         aiDeleting: false,
@@ -1405,6 +1426,34 @@
             if (res.success) this.aiApplyResolved(res.data);
             else this.aiError = res.message || '解析入库路径失败';
           }).catch(error => { this.aiError = '解析入库路径失败：' + error; });
+        },
+        // 直接分析粘贴进来的链接（搜索源没收录的分享走这条）
+        aiAnalyzeDirect() {
+          const url = (this.aiForm.shareurl || '').trim();
+          if (!url) { this.showToast('请粘贴分享链接', 'warning'); return; }
+          if (!/pan\.quark\.cn\/s\/[\w-]+/.test(url)) {
+            this.showToast('这看起来不是夸克分享链接', 'warning');
+            return;
+          }
+          if (!this.aiForm.taskname) {
+            this.aiForm.taskname = (this.aiForm.keyword || '').trim();
+          }
+          if (!this.aiForm.taskname) {
+            this.showToast('请先在上面填剧名（用于命名和定位文件夹）', 'warning');
+            return;
+          }
+          // 手工链接没有候选列表，清掉搜索态的残留
+          this.aiResult = null;
+          this.aiAnalysis = null;
+          this.aiCommitLog = '';
+          this.aiError = '';
+          this.aiFilter = 'all';
+          this.aiCandidatesCollapsed = true;
+          // 先解析入库位置，再分析（分析要用到 savepath）
+          this.$nextTick(() => {
+            this.aiResolvePath();
+            this.aiAnalyze();
+          });
         },
         aiSearch() {
           const keyword = (this.aiForm.keyword || '').trim();
