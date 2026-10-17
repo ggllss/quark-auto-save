@@ -567,6 +567,37 @@ def test_tmdb_specials():
     check("TMDB 当天没有的（回顾特辑）不硬套集号", num("20260927.回顾特辑.mp4") is None,
           num("20260927.回顾特辑.mp4"))
 
+    # 正片：用 TMDB 该季的真实集号（不能按文件顺序数）
+    season_eps = [
+        {"number": 1, "name": "第1期上：看见蔚蓝生机", "air_date": "2026-10-10"},
+        {"number": 2, "name": "第1期下：神秘的热带雨林", "air_date": "2026-10-11"},
+        {"number": 3, "name": "第2期上：哞哞来了！", "air_date": "2026-10-17"},
+        {"number": 4, "name": "第2期下", "air_date": "2026-10-18"},
+    ]
+
+    def snum(fn):
+        hit = tmdb.match_special(season_eps, fn, None)
+        return hit.get("number") if hit else None
+
+    check("正片「第2期上」→ S04E03（用户指出的正确值）",
+          snum("20261017(第2期上).mp4") == 3, snum("20261017(第2期上).mp4"))
+    check("正片「第1期下」→ S04E02", snum("20261011 第1期下 4K：xxx.mp4") == 2,
+          snum("20261011 第1期下 4K：xxx.mp4"))
+    check("正片「第1期上」→ S04E01", snum("20261010(第1期上).mp4") == 1,
+          snum("20261010(第1期上).mp4"))
+
+    # 同一天的多条特辑只能靠片名区分
+    same_day = [
+        {"number": 134, "name": "第4季 第1期上·慢速目击证人纯享", "air_date": "2026-10-10"},
+        {"number": 135, "name": "第4季 第1期上·捣蛋鱼医生纯享", "air_date": "2026-10-10"},
+    ]
+    check("两个「纯享」片段按片名区分（慢速目击证人）",
+          tmdb.match_special(same_day, "20261010(第1期上·慢速目击证人纯享).mp4", 4)["number"] == 134,
+          tmdb.match_special(same_day, "20261010(第1期上·慢速目击证人纯享).mp4", 4))
+    check("两个「纯享」片段按片名区分（捣蛋鱼医生）",
+          tmdb.match_special(same_day, "20261010(第1期上·捣蛋鱼医生纯享).mp4", 4)["number"] == 135,
+          tmdb.match_special(same_day, "20261010(第1期上·捣蛋鱼医生纯享).mp4", 4))
+
 
 def main():
     mr = MagicRename()

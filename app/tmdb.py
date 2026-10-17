@@ -172,6 +172,12 @@ def name_tags(name):
     return {t for t in _TAG_WORDS if t in low}
 
 
+def _bigrams(text):
+    """把文本切成二元组，用于粗略判断片名相似度（中文无需分词）"""
+    t = re.sub(r"[\s.\-_:：·（）()【】\[\]，,！!？?、]", "", text or "")
+    return {t[i:i + 2] for i in range(len(t) - 1)}
+
+
 def _score(episode, filename, period, part, tags, season=None):
     """给特辑候选打分：标题里命中的信息越多越像"""
     ename = episode.get("name") or ""
@@ -194,6 +200,11 @@ def _score(episode, filename, period, part, tags, season=None):
     e_part = name_part(ename)
     if part and e_part:
         score += 2 if part == e_part else -2
+    # 片名相似度：同一天往往有多条特辑（如两个不同的「纯享」片段），
+    # 只能靠标题里的具体内容区分
+    fn_grams, ep_grams = _bigrams(filename), _bigrams(ename)
+    if fn_grams and ep_grams:
+        score += min(len(fn_grams & ep_grams), 8)
     # 标题里带的期号/上下集和文件名冲突时，基本可以排除
     return score
 
@@ -237,6 +248,42 @@ def match_special(episodes, filename, season=None):
     return out
 
 
+def resolve_show(api_key, taskname):
+    """按剧名找到 TMDB 剧集，返回剧集 id（找不到返回 None）"""
+    try:
+        shows = search_series(api_key, taskname)
+    except Exception:  # noqa: BLE001 - 网络问题不影响入库
+        return None
+    if not shows:
+        return None
+    for s in shows:
+        if (s.get("name") or "") == taskname:
+            return s["id"]
+    return shows[0]["id"]
+
+
+def season_map_for_show(api_key, taskname, filenames, season):
+    """
+    正片的集号：按文件名里的日期 / 期号 / 上下集，匹配该季的真实集号
+    （例如「第2期上」在 TMDB 是 S04E03）。返回 {文件名: 集号}。
+    """
+    if not api_key or not filenames or not season:
+        return {}
+    tv_id = resolve_show(api_key, taskname)
+    if not tv_id:
+        return {}
+    try:
+        episodes = season_episodes(api_key, tv_id, season)
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {}
+    for fn in filenames:
+        hit = match_special(episodes, fn, None)
+        if hit and hit.get("number"):
+            out[fn] = int(hit["number"])
+    return out
+
+
 def specials_for_show(api_key, taskname, filenames, season=None):
     """
     一次性把一批花絮文件映射到 TMDB 特辑季集号。
@@ -245,20 +292,11 @@ def specials_for_show(api_key, taskname, filenames, season=None):
     """
     if not api_key or not filenames:
         return {}
-    try:
-        shows = search_series(api_key, taskname)
-    except Exception:  # noqa: BLE001 - 网络问题不影响入库
+    tv_id = resolve_show(api_key, taskname)
+    if not tv_id:
         return {}
-    if not shows:
-        return {}
-    # 优先取名字最接近的
-    target = shows[0]
-    for s in shows:
-        if (s.get("name") or "") == taskname:
-            target = s
-            break
     try:
-        episodes = season_episodes(api_key, target["id"], 0)
+        episodes = season_episodes(api_key, tv_id, 0)
     except Exception:  # noqa: BLE001
         return {}
     out = {}

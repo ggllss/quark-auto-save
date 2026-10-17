@@ -1216,6 +1216,8 @@ def ai_analyze():
             if f.get("dir"):
                 continue
             fn = f.get("file_name") or ""
+            if _is_extra_file(fn):
+                continue          # 花絮走 S00，不占正片的序号
             pending.append(
                 {
                     "file_name_re": mr.sub(rule_pattern, rule_replace, fn),
@@ -1229,6 +1231,29 @@ def ai_analyze():
             resolved_names = {p["_orig"]: p["file_name_re"] for p in pending}
         except Exception:
             resolved_names = {}
+
+    # 正片的集号：用 TMDB 该季的真实集号（第2期上 = S04E03）。
+    # 不能按文件顺序数——分享里混着花絮和重复文件时序号会完全错位。
+    _tail = savepath_norm.rsplit("/", 1)[-1] or ""
+    _season_no = int(_tail[1:]) if re.fullmatch(r"[Ss]\d{1,2}", _tail) else None
+    _main_files = [
+        f.get("file_name") or ""
+        for f in share_list
+        if not f.get("dir") and not _is_extra_file(f.get("file_name"))
+    ]
+    season_map = {}
+    if _main_files:
+        try:
+            season_map = tmdb.season_map_for_show(
+                (config_data.get("tmdb") or {}).get("api_key")
+                or os.environ.get("TMDB_API_KEY")
+                or "",
+                taskname,
+                _main_files,
+                _season_no,
+            )
+        except Exception:  # noqa: BLE001 - 查不到就退回顺序号
+            season_map = {}
 
     # 花絮素材的集数：用「集数起点」把期号换算成真实集数
     # （如 S04 第1期在 TMDB 是第 138 集 → 起点填 138，则第N期 = 137+N）。
@@ -1379,9 +1404,16 @@ def ai_analyze():
                     if (rule_pattern and rule_ok)
                     else True
                 )
-                new_name = resolved_names.get(name) or (
-                    mr.sub(rule_pattern, rule_replace, name) if rule_ok else name
-                )
+                _num = season_map.get(name)
+                if _num and re.search(r"\{I+\}", rule_replace or ""):
+                    # 把模板里的 {II} 换成 TMDB 的真实集号（补齐两位，和库里一致）
+                    _tpl = re.sub(r"\{I+\}", str(_num).zfill(2), rule_replace)
+                    new_name = mr.sub(rule_pattern, _tpl, name) if rule_ok else name
+                    row["tmdb_episode"] = _num
+                else:
+                    new_name = resolved_names.get(name) or (
+                        mr.sub(rule_pattern, rule_replace, name) if rule_ok else name
+                    )
             exists_orig = bool(mr.is_exists(name, cmp_names))
             exists_new = bool(mr.is_exists(new_name, cmp_names))
             row["new_name"] = new_name or name
@@ -1464,6 +1496,7 @@ def ai_analyze():
         "extra_exists": extra_exists,
         "extra_note": extra_note,
         "tmdb_matched": len(tmdb_map),
+        "tmdb_main_matched": len(season_map),
         "tmdb_enabled": bool(tmdb_key),
         "dir_file_count": len(dir_names),
         "dir_files": dir_names[:100],
