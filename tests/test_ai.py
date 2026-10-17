@@ -599,6 +599,44 @@ def test_tmdb_specials():
           tmdb.match_special(same_day, "20261010(第1期上·捣蛋鱼医生纯享).mp4", 4))
 
 
+def test_plugin_per_dir():
+    print("【17】插件按目标目录逐个触发（S04 与 S00 都要扫）")
+    import io
+    import run
+
+    class FakePlugin:
+        is_active = True
+
+        def __init__(self):
+            self.calls = []
+
+        def run(self, task, **kwargs):
+            self.calls.append(task.get("savepath"))
+
+    class IdlePlugin:
+        is_active = False
+
+        def __init__(self):
+            self.calls = []
+
+        def run(self, task, **kwargs):
+            self.calls.append(task.get("savepath"))
+
+    active, idle = FakePlugin(), IdlePlugin()
+    buf = io.StringIO()
+    got = run._run_plugins(
+        {"smartstrm": active, "other": idle},
+        ["/0-影音/综艺/现在就出发/S04", "/0-影音/综艺/现在就出发/S00"],
+        {"taskname": "现在就出发"},
+        None, None, buf,
+    )
+    check("两个目录各触发一次", active.calls == [
+        "/0-影音/综艺/现在就出发/S04", "/0-影音/综艺/现在就出发/S00",
+    ], active.calls)
+    check("只触发启用中的插件", got == ["smartstrm"], got)
+    check("未启用的插件不触发", idle.calls == [], idle.calls)
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -628,6 +666,7 @@ def main():
     test_content_key()
     test_extra_routing()
     test_tmdb_specials()
+    test_plugin_per_dir()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0

@@ -18,6 +18,8 @@ from apscheduler.triggers.cron import CronTrigger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sdk.cloudsaver import CloudSaver
 from sdk.pansou import PanSou
+import contextlib
+
 import ai
 import tmdb
 from datetime import timedelta
@@ -687,6 +689,30 @@ def _link_alive(account, shareurl):
         return False
     except Exception:
         return None
+
+
+def _run_plugins(plugins, targets, base_task, account, tree, buf):
+    """
+    按目标目录逐个触发插件。
+
+    SmartStrm 这类插件一次只扫一个目录，而花絮会落到 S00、正片落到 S04，
+    两个目录都得各自扫一次，否则另一个目录不会生成 .strm。
+    返回实际触发过的插件名列表。
+    """
+    triggered = []
+    for plugin_name, plugin in plugins.items():
+        if not (getattr(plugin, "is_active", False) and hasattr(plugin, "run")):
+            continue
+        triggered.append(plugin_name)
+        for path in targets:
+            task = dict(base_task)
+            task["savepath"] = path
+            try:
+                with contextlib.redirect_stdout(buf):
+                    plugin.run(task, account=account, tree=tree)
+            except Exception as e:  # noqa: BLE001 - 单个插件失败不影响入库
+                buf.write("  插件 %s 处理 %s 出错：%s\n" % (plugin_name, path, e))
+    return triggered
 
 
 def _source_unreachable():
@@ -1664,6 +1690,8 @@ def ai_commit():
     renamed = 0
     last_tree = None
     last_savepath = ""
+    # 本次入库实际写过的目标目录（S04、S00 各一个），插件要按目录逐个触发
+    saved_paths = []
     for (parent_fid, group_savepath), group in groups.items():
         rename_map = {}
         for f in group:
@@ -1699,6 +1727,8 @@ def ai_commit():
             if tree:
                 last_tree = tree
                 last_savepath = group_savepath
+                if group_savepath not in saved_paths:
+                    saved_paths.append(group_savepath)
         except Exception as e:
             buf.write("转存异常：%s\n%s\n" % (e, traceback.format_exc()))
             ok_all = False
@@ -1710,25 +1740,28 @@ def ai_commit():
             plugins, _pc, task_plugins_cfg = Config.load_plugins(
                 dict(config_data.get("plugins") or {})
             )
-            plugin_task = {
-                "taskname": taskname,
-                "savepath": last_savepath or savepath_norm,
-                "shareurl": shareurl,
-                "pattern": ".*",
-                "replace": "",
-                "addition": task_plugins_cfg,
-            }
-            triggered = []
-            for plugin_name, plugin in plugins.items():
-                if getattr(plugin, "is_active", False) and hasattr(plugin, "run"):
-                    triggered.append(plugin_name)
-                    try:
-                        with contextlib.redirect_stdout(buf):
-                            plugin.run(plugin_task, account=account, tree=last_tree)
-                    except Exception as e:
-                        buf.write("  插件 %s 出错：%s\n" % (plugin_name, e))
+            # 花絮会落到 S00、正片落到 S04，SmartStrm 一次只扫一个目录，
+            # 所以每个实际写过的目录都要单独触发一次，否则另一个目录不会生成 strm
+            targets = saved_paths or [savepath_norm]
+            triggered = _run_plugins(
+                plugins,
+                targets,
+                {
+                    "taskname": taskname,
+                    "shareurl": shareurl,
+                    "pattern": ".*",
+                    "replace": "",
+                    "addition": task_plugins_cfg,
+                },
+                account,
+                last_tree,
+                buf,
+            )
             if triggered:
-                buf.write("\n🧩 已触发插件：%s\n" % "、".join(triggered))
+                buf.write(
+                    "\n🧩 已触发插件：%s（覆盖目录 %s）\n"
+                    % ("、".join(triggered), "、".join(targets))
+                )
             else:
                 buf.write("\n（没有启用中的插件需要触发）\n")
         except Exception as e:
