@@ -94,6 +94,7 @@ if (!options) {
 const ctx = Object.assign({}, JSON.parse(JSON.stringify(options.data)), options.methods);
 ctx.showToast = function () {};
 ctx.$set = function (o, k, v) { o[k] = v; };
+ctx.$nextTick = function (fn) { fn(); };
 const tick = () => new Promise(r => setTimeout(r, 5));
 
 // -------------------------------------------------------------------- 用例
@@ -378,6 +379,94 @@ function testMobileMarkup() {
   check('类型目录可在系统配置里修改', html.includes('formData.ai.media_roots[t]'));
 }
 
+async function testMobileInteraction() {
+  console.log('【9】手机端操作逻辑（不只是样式）');
+  ctx.aiAnalysis = {
+    rows: [
+      { fid: 'a', file_name: 'A.E01.mp4', status: 'new', status_text: '可新增', new_name: 'x', selected: false },
+      { fid: 'b', file_name: 'A.E02.mp4', status: 'dup_episode', status_text: '疑似重复', new_name: 'y', selected: false },
+      { fid: 'c', file_name: 'A.E03.mp4', status: 'exists', status_text: '已在库', new_name: 'z', selected: false },
+      { fid: 'd', file_name: 'A.E04.mp4', status: 'unmatched', status_text: '不匹配规则', new_name: 'w', selected: false }
+    ],
+    stats: { new: 1, exists: 1, dup_episode: 1, unmatched: 1, folder: 0 },
+    dir_file_count: 3, rule: { valid: true }
+  };
+
+  ctx.aiFilter = 'all';
+  check('「全部」返回所有行', ctx.aiFilteredRows().length === 4);
+  ctx.aiFilter = 'new';
+  check('「可新增」只返回可新增行',
+    ctx.aiFilteredRows().length === 1 && ctx.aiFilteredRows()[0].status === 'new');
+  ctx.aiFilter = 'dup';
+  check('「疑似重复」只返回疑似重复行',
+    ctx.aiFilteredRows().length === 1 && ctx.aiFilteredRows()[0].status === 'dup_episode');
+  ctx.aiFilter = 'exists';
+  check('「已在库」含不可转存项（含不匹配规则）', ctx.aiFilteredRows().length === 2);
+  check('筛选按钮上的计数正确',
+    ctx.aiFilterCount('new') === 1 && ctx.aiFilterCount('exists') === 2 && ctx.aiFilterCount('all') === 4);
+
+  // 全选只作用于当前筛选可见的行（所见即所得）
+  ctx.aiFilter = 'dup';
+  ctx.aiToggleAll({ target: { checked: true } });
+  check('全选只影响可见行',
+    ctx.aiAnalysis.rows[1].selected === true && ctx.aiAnalysis.rows[0].selected === false,
+    [ctx.aiAnalysis.rows[0].selected, ctx.aiAnalysis.rows[1].selected]);
+  check('不可转存的行不受全选影响', ctx.aiAnalysis.rows[2].selected === false);
+
+  // 一键只选可新增（手机上少点几次）
+  ctx.aiFilter = 'all';
+  ctx.aiAnalysis.rows.forEach(r => { r.selected = true; });
+  ctx.aiSelectOnlyNew();
+  check('「只选可新增」会清掉疑似重复的勾选',
+    ctx.aiAnalysis.rows.filter(r => r.selected).length === 1 && ctx.aiAnalysis.rows[0].selected === true);
+
+  // 选定链接后收起候选列表，避免把结果顶到很远
+  ctx.aiCandidatesCollapsed = false;
+  ctx.aiSelectedCandidate = null;
+  ctx.aiForm.taskname = 'X';
+  global.__nextResponse = {
+    data: { success: true, data: { rows: [], stats: {}, rule: { valid: true }, dir_files: [] } }
+  };
+  ctx.aiSelectLink({ taskname: '资源A', shareurl: 'https://pan.quark.cn/s/aaa' });
+  check('选定链接后自动收起候选列表', ctx.aiCandidatesCollapsed === true);
+  check('记住已选候选用于摘要展示',
+    !!ctx.aiSelectedCandidate && ctx.aiSelectedCandidate.taskname === '资源A');
+  await tick();
+
+  let scrollSafe = true;
+  try { ctx.aiScrollToResults(); } catch (e) { scrollSafe = false; }
+  check('无 DOM 环境下滚动逻辑不抛错', scrollSafe);
+
+  console.log('【10】手机端交互所需的页面结构');
+  check('底部有常驻操作条', html.includes('ai-actionbar'));
+  check('入库设置在手机上可折叠、桌面常开',
+    html.includes('ai-settings-collapsible')
+    && html.includes('.ai-settings-collapsible { display: block !important; }'));
+  check('状态筛选按钮组存在', html.includes('ai-filter-chips') && html.includes("aiFilter = 'new'"));
+  check('列表按筛选结果渲染', html.includes('v-for="(row, ri) in aiFilteredRows()"'));
+  check('分析区有滚动锚点', html.includes('id="aiAnalysisAnchor"'));
+  check('手机端底部留白，避免被操作条遮挡', html.includes('ai-has-actionbar'));
+  check('滚动到结果区时避开 sticky 导航',
+    html.includes('#aiAnalysisAnchor { scroll-margin-top: 64px; }'));
+  check('收起候选后可一键重新选择', html.includes('aiCandidatesCollapsed = false'));
+  check('手机端把原有浮动按钮抬高避让', html.includes('.bottom-buttons { bottom: 84px; }'));
+  check('入库后有日志锚点可自动滚到结果', html.includes('id="aiCommitLogAnchor"'));
+  check('搜索时显示已等待秒数', html.includes('已等待 <b>{{ aiSearchElapsed }}</b> 秒'));
+
+  // 入库后重新分析时，滚动目标应是日志而不是列表顶部
+  ctx.aiScrollTarget = 'log';
+  const scrolled = [];
+  ctx.aiScrollTo = function (id) { scrolled.push(id); };
+  global.__nextResponse = {
+    data: { success: true, data: { rows: [], stats: {}, rule: { valid: true }, dir_files: [] } }
+  };
+  ctx.aiForm.shareurl = 'https://pan.quark.cn/s/aaa';
+  ctx.aiAnalyze();
+  await tick();
+  check('入库后滚到日志而不是列表顶部', scrolled[0] === 'aiCommitLogAnchor', scrolled);
+  check('滚动目标用完即清空', ctx.aiScrollTarget === '');
+}
+
 (async () => {
   await testComponent();
   testHandlers();
@@ -387,6 +476,7 @@ function testMobileMarkup() {
   await testFetchDataNormalize();
   await testPathResolution();
   testMobileMarkup();
+  await testMobileInteraction();
   console.log('\n结果: ' + passed + ' 通过, ' + failed + ' 失败');
   process.exit(failed ? 1 : 0);
 })();

@@ -9,6 +9,50 @@
   <link rel="stylesheet" href="./static/css/bootstrap.min.css">
   <link rel="stylesheet" href="./static/css/bootstrap-icons.min.css">
   <link rel="stylesheet" href="./static/css/dashboard.css">
+  <style>
+    /* ===== AI 追剧：手机端操作模式 ===== */
+    /* 底部常驻操作条：入库按钮始终在拇指可及处，不用翻到列表末尾 */
+    .ai-actionbar {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 1035;
+      background: #fff;
+      border-top: 1px solid #dee2e6;
+      padding: 8px 12px;
+      padding-bottom: calc(8px + env(safe-area-inset-bottom));
+      box-shadow: 0 -2px 10px rgba(0, 0, 0, .08);
+    }
+
+    /* 分析结果滚动到顶部时，避开 sticky 的顶部导航 */
+    #aiAnalysisAnchor { scroll-margin-top: 64px; }
+
+    @media (max-width: 767.98px) {
+      /* 给固定操作条留出空间，避免遮住最后一条 */
+      .ai-has-actionbar { padding-bottom: 88px; }
+
+      /* 抬高原有的圆形浮动按钮（保存/运行/回顶），避免与操作条重叠 */
+      .bottom-buttons { bottom: 84px; }
+      .bottom-buttons button { width: 44px; height: 44px; }
+
+      /* 筛选按钮横向滚动，不换行挤压 */
+      .ai-filter-chips {
+        overflow-x: auto;
+        white-space: nowrap;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 2px;
+      }
+
+      /* 手机上加大点按区域 */
+      .ai-row-check { width: 22px; height: 22px; }
+    }
+
+    /* 入库设置在桌面上始终展开，手机端才需要点开 */
+    @media (min-width: 768px) {
+      .ai-settings-collapsible { display: block !important; }
+    }
+  </style>
   <!-- Bootstrap JS -->
   <script src="./static/js/jquery-3.5.1.slim.min.js"></script>
   <script src="./static/js/bootstrap.bundle.min.js"></script>
@@ -568,7 +612,8 @@
                   <b>哪些集可更新由确定性比对得出</b>（分享文件 × 目标目录已有文件），不靠模型猜。
                 </small>
                 <small v-if="aiSearching" class="text-info d-block mt-2">
-                  <i class="bi bi-hourglass-split mr-1"></i>正在搜索…公共搜索源较慢时可能需要 1-2 分钟，请勿关闭页面。
+                  <i class="bi bi-hourglass-split mr-1"></i>正在搜索…已等待 <b>{{ aiSearchElapsed }}</b> 秒
+                  （公共搜索源较慢时可能需要 1-2 分钟，请勿关闭页面）
                 </small>
                 <div v-if="aiStatus && aiStatus.ready === false" class="alert alert-warning mt-2 mb-0 py-2 small">
                   <i class="bi bi-exclamation-triangle mr-1"></i>
@@ -599,7 +644,15 @@
                 已用它的保存路径与命名规则作为默认值。
               </div>
 
-              <div class="table-responsive">
+              <!-- 选定链接后收起候选列表：几十条候选会把分析结果顶到很下面 -->
+              <div v-if="aiCandidatesCollapsed && aiSelectedCandidate"
+                   class="alert alert-light py-2 small d-flex align-items-center mb-2">
+                <i class="bi bi-check2-circle text-success mr-1"></i>
+                <span class="flex-fill text-break">已选资源：{{ aiSelectedCandidate.taskname }}</span>
+                <button class="btn btn-sm btn-outline-secondary ml-2 flex-shrink-0" type="button"
+                        @click="aiCandidatesCollapsed = false">重新选择</button>
+              </div>
+              <div v-else class="table-responsive">
               <table class="table table-sm table-hover">
                 <thead>
                   <tr>
@@ -639,8 +692,27 @@
             </div>
 
             <!-- 步骤3：分析结果 + 规则编辑 -->
-            <div v-if="aiAnalysis">
+            <div v-if="aiAnalysis" id="aiAnalysisAnchor" class="ai-has-actionbar">
               <hr>
+              <!-- 摘要条：手机上默认收起设置，这里一眼看到类型、季号与入库位置 -->
+              <div class="d-flex align-items-start mb-2 small">
+                <div class="flex-fill text-break" style="min-width:0">
+                  <span class="badge badge-light mr-1">{{ aiForm.category || '未定类型' }}</span>
+                  <span v-if="aiForm.season" class="badge badge-light mr-1">第 {{ aiForm.season }} 季</span>
+                  <span class="badge mr-1"
+                        :class="(aiResolved && (aiResolved.create_dirs || []).length) ? 'badge-info' : 'badge-success'">
+                    {{ (aiResolved && (aiResolved.create_dirs || []).length) ? '将新建' : '已存在' }}
+                  </span>
+                  <code>{{ aiForm.savepath }}</code>
+                </div>
+                <button class="btn btn-sm btn-outline-secondary ml-2 flex-shrink-0 d-md-none" type="button"
+                        @click="aiSettingsOpen = !aiSettingsOpen">
+                  <i class="bi" :class="aiSettingsOpen ? 'bi-chevron-up' : 'bi-gear'"></i>
+                  {{ aiSettingsOpen ? '收起' : '设置' }}
+                </button>
+              </div>
+
+              <div class="ai-settings-collapsible" v-show="aiSettingsOpen">
               <div class="form-row">
                 <div class="col-12 col-md-4">
                   <div class="form-group mb-2">
@@ -736,14 +808,30 @@
                   </div>
                 </div>
               </div>
+              </div><!-- /ai-settings-collapsible -->
 
-              <div class="mb-2 small">
-                <span class="badge badge-success mr-1">可新增 {{ aiAnalysis.stats.new }}</span>
-                <span class="badge badge-secondary mr-1">已在库 {{ aiAnalysis.stats.exists }}</span>
-                <span class="badge badge-warning mr-1">疑似重复 {{ aiAnalysis.stats.dup_episode }}</span>
-                <span class="badge badge-light mr-1">不匹配规则 {{ aiAnalysis.stats.unmatched }}</span>
-                <span class="badge badge-info mr-1">文件夹 {{ aiAnalysis.stats.folder }}</span>
-                <span class="text-muted">目标目录已有 {{ aiAnalysis.dir_file_count }} 个文件</span>
+              <!-- 状态筛选：既是统计也是筛选按钮，手机上点一下就能只看重点 -->
+              <div class="d-flex align-items-center mb-2 ai-filter-chips">
+                <button class="btn btn-sm mr-1 flex-shrink-0" type="button"
+                        :class="aiFilter === 'all' ? 'btn-primary' : 'btn-outline-secondary'"
+                        @click="aiFilter = 'all'">全部 {{ aiFilterCount('all') }}</button>
+                <button class="btn btn-sm mr-1 flex-shrink-0" type="button"
+                        :class="aiFilter === 'new' ? 'btn-primary' : 'btn-outline-secondary'"
+                        @click="aiFilter = 'new'">可新增 {{ aiFilterCount('new') }}</button>
+                <button class="btn btn-sm mr-1 flex-shrink-0" type="button"
+                        :class="aiFilter === 'dup' ? 'btn-primary' : 'btn-outline-secondary'"
+                        @click="aiFilter = 'dup'">疑似重复 {{ aiFilterCount('dup') }}</button>
+                <button class="btn btn-sm mr-1 flex-shrink-0" type="button"
+                        :class="aiFilter === 'exists' ? 'btn-primary' : 'btn-outline-secondary'"
+                        @click="aiFilter = 'exists'">不可转存 {{ aiFilterCount('exists') }}</button>
+                <span class="flex-fill"></span>
+                <button class="btn btn-sm btn-outline-success d-md-none flex-shrink-0" type="button"
+                        @click="aiSelectOnlyNew()">只选可新增</button>
+              </div>
+              <div class="mb-2 small text-muted">
+                <span v-if="aiAnalysis.stats.unmatched">不匹配规则 {{ aiAnalysis.stats.unmatched }} · </span>
+                <span v-if="aiAnalysis.stats.folder">文件夹 {{ aiAnalysis.stats.folder }} · </span>
+                目标目录已有 {{ aiAnalysis.dir_file_count }} 个文件
               </div>
               <div v-if="aiAnalysis.dir_note" class="alert alert-warning py-2 small">{{ aiAnalysis.dir_note }}</div>
               <div v-if="!aiAnalysis.rule.valid" class="alert alert-danger py-2 small">
@@ -764,13 +852,15 @@
                          :checked="aiAllSelected()" @change="aiToggleAll($event)">
                   <label class="custom-control-label small" for="aiSelectAllMobile">全选可转存项</label>
                 </div>
-                <div v-for="(row, ri) in aiAnalysis.rows" :key="'m' + ri"
+                <div v-if="!aiFilteredRows().length" class="alert alert-light py-2 small">
+                  当前筛选下没有文件。
+                </div>
+                <div v-for="(row, ri) in aiFilteredRows()" :key="'m' + ri"
                      class="border rounded p-2 mb-2"
                      :class="{'border-success': row.status === 'new', 'border-warning': row.status === 'dup_episode'}">
                   <div class="d-flex align-items-start">
-                    <input type="checkbox" class="mr-2 mt-1" style="width:22px;height:22px;flex:0 0 auto"
-                           v-model="row.selected"
-                           :disabled="row.status === 'exists' || row.status === 'rule_error'">
+                    <input type="checkbox" class="mr-2 mt-1 ai-row-check" style="flex:0 0 auto"
+                           v-model="row.selected" :disabled="!aiSelectable(row)">
                     <div class="flex-fill" style="min-width:0">
                       <div class="small font-weight-bold">{{ row.status_text }}</div>
                       <div class="small text-muted text-break">{{ row.file_name }}</div>
@@ -796,11 +886,10 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="(row, ri) in aiAnalysis.rows" :key="ri"
+                  <tr v-for="(row, ri) in aiFilteredRows()" :key="ri"
                       :class="{'table-success': row.status === 'new', 'table-warning': row.status === 'dup_episode'}">
                     <td>
-                      <input type="checkbox" v-model="row.selected"
-                             :disabled="row.status === 'exists' || row.status === 'rule_error'">
+                      <input type="checkbox" v-model="row.selected" :disabled="!aiSelectable(row)">
                     </td>
                     <td><small>{{ row.status_text }}</small></td>
                     <td><small :title="row.file_name">{{ row.file_name }}</small></td>
@@ -815,8 +904,8 @@
               </div>
 
               <div class="mb-2 d-flex flex-wrap align-items-center">
-                <b class="mr-2">已选 {{ aiSelectedCount() }} 项</b>
-                <button class="btn btn-success mr-2 mb-1" type="button"
+                <b class="mr-2 d-none d-md-inline">已选 {{ aiSelectedCount() }} 项</b>
+                <button class="btn btn-success mr-2 mb-1 d-none d-md-inline-block" type="button"
                         :disabled="aiCommitting || aiSelectedCount() === 0" @click="aiCommit()">
                   <i v-if="aiCommitting" class="spinner-border spinner-border-sm mr-1"></i>
                   <i v-else class="bi bi-box-arrow-in-down mr-1"></i>确认入库
@@ -825,10 +914,25 @@
                 <small class="text-muted d-none d-md-inline">按上表文件名重命名后转存（一次性，不创建任务）</small>
               </div>
 
-              <div v-if="aiCommitLog" class="card mb-3">
+              <div v-if="aiCommitLog" id="aiCommitLogAnchor" class="card mb-3">
                 <div class="card-header py-1"><b>入库结果</b></div>
                 <div class="card-body py-2">
                   <pre class="small mb-0" style="max-height:320px;overflow:auto;">{{ aiCommitLog }}</pre>
+                </div>
+              </div>
+
+              <!-- 手机端常驻操作条：入库按钮始终在拇指可及处，不用翻到列表末尾 -->
+              <div class="ai-actionbar d-md-none">
+                <div class="d-flex align-items-center">
+                  <div class="flex-fill pr-2" style="min-width:0">
+                    <div class="small"><b>已选 {{ aiSelectedCount() }}</b> / {{ aiAnalysis.rows.length }} 项</div>
+                    <div class="text-muted text-truncate" style="font-size:11px">{{ aiForm.savepath }}</div>
+                  </div>
+                  <button class="btn btn-success flex-shrink-0" type="button"
+                          :disabled="aiCommitting || aiSelectedCount() === 0" @click="aiCommit()">
+                    <i v-if="aiCommitting" class="spinner-border spinner-border-sm mr-1"></i>
+                    <i v-else class="bi bi-box-arrow-in-down mr-1"></i>确认入库
+                  </button>
                 </div>
               </div>
             </div>
@@ -1090,8 +1194,16 @@
         aiResult: null,
         aiAnalysis: null,
         aiResolved: null,
+        aiSelectedCandidate: null,
         aiBaselinePath: '',
         aiCategoryOptions: ['电视剧', '电影', '动漫', '综艺', '纪录片'],
+        // 手机端交互状态：设置折叠、候选列表收起、状态筛选
+        aiSettingsOpen: false,
+        aiCandidatesCollapsed: false,
+        aiFilter: 'all',
+        aiScrollTarget: '',
+        aiSearchElapsed: 0,
+        aiSearchTimer: null,
         aiCommitLog: "",
         aiError: "",
         aiStatus: {},
@@ -1150,6 +1262,7 @@
       },
       beforeDestroy() {
         window.removeEventListener('beforeunload', this.handleBeforeUnload);
+        if (this.aiSearchTimer) { clearInterval(this.aiSearchTimer); this.aiSearchTimer = null; }
       },
       methods: {
         // ==================== AI 追剧 ====================
@@ -1192,6 +1305,10 @@
           this.aiResult = null;
           this.aiAnalysis = null;
           this.aiCommitLog = '';
+          // 公共搜索源慢的时候要等一两分钟，给个秒数让用户知道没卡死
+          this.aiSearchElapsed = 0;
+          if (this.aiSearchTimer) clearInterval(this.aiSearchTimer);
+          this.aiSearchTimer = setInterval(() => { this.aiSearchElapsed += 1; }, 1000);
           axios.post('/ai/search', { keyword: keyword })
             .then(response => {
               const res = response.data;
@@ -1222,12 +1339,28 @@
               }
             })
             .catch(error => { this.aiError = '搜索请求失败：' + error; })
-            .finally(() => { this.aiSearching = false; });
+            .finally(() => {
+              this.aiSearching = false;
+              if (this.aiSearchTimer) { clearInterval(this.aiSearchTimer); this.aiSearchTimer = null; }
+            });
         },
         aiSelectLink(cand) {
           this.aiForm.shareurl = cand.shareurl;
+          this.aiSelectedCandidate = cand;
           if (!this.aiForm.taskname) this.aiForm.taskname = cand.taskname || this.aiForm.keyword;
+          // 收起候选列表：几十条候选会把分析结果顶到很远，手机上尤其难受
+          this.aiCandidatesCollapsed = true;
           this.aiAnalyze();
+        },
+        aiScrollTo(id) {
+          if (typeof document === 'undefined' || !document.getElementById) return;
+          const el = document.getElementById(id);
+          if (el && el.scrollIntoView) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }
+        },
+        aiScrollToResults() {
+          this.aiScrollTo('aiAnalysisAnchor');
         },
         aiAnalyze(suggestRule = false) {
           if (!this.aiForm.shareurl) { this.showToast('请先选择一个候选链接', 'warning'); return; }
@@ -1247,12 +1380,23 @@
               const data = res.data;
               data.rows.forEach(row => { row.selected = !!row.default_selected; });
               this.aiAnalysis = data;
+              this.aiFilter = 'all';
               if (suggestRule && data.rule_suggestion && !data.rule_suggestion.error) {
                 const sug = data.rule_suggestion;
                 if (sug.pattern) this.aiForm.pattern = sug.pattern;
                 if (sug.replace !== undefined) this.aiForm.replace = sug.replace;
                 this.showToast('已采纳推荐规则', 'success');
               }
+              // 手机上直接落到结果区，不用自己往下翻；
+              // 入库后重新分析时改为落到结果日志，让用户马上看到转存结果
+              this.$nextTick(() => {
+                if (this.aiScrollTarget === 'log') {
+                  this.aiScrollTarget = '';
+                  this.aiScrollTo('aiCommitLogAnchor');
+                } else {
+                  this.aiScrollToResults();
+                }
+              });
             })
             .catch(error => { this.aiError = '分析请求失败：' + error; })
             .finally(() => { this.aiAnalyzing = false; });
@@ -1273,20 +1417,43 @@
           const preset = (this.formData.magic_regex || {})[this.aiForm.pattern];
           return preset ? preset.replace : '留空则沿用预设规则的替换模板';
         },
+        // 可转存的条目：已在库、规则无效、不匹配规则的文件勾了也不会被转存
+        // （不匹配规则会被引擎第一道闸门直接跳过），所以一律不允许勾选
         aiSelectable(row) {
-          return row.status !== 'exists' && row.status !== 'rule_error';
+          return row.status !== 'exists' && row.status !== 'rule_error' && row.status !== 'unmatched';
+        },
+        // 状态筛选后可见的行。勾选与全选只作用于可见行，所见即所得
+        aiFilteredRows() {
+          const rows = (this.aiAnalysis && this.aiAnalysis.rows) || [];
+          if (this.aiFilter === 'new') return rows.filter(r => r.status === 'new');
+          if (this.aiFilter === 'dup') return rows.filter(r => r.status === 'dup_episode');
+          if (this.aiFilter === 'exists') return rows.filter(r => !this.aiSelectable(r));
+          return rows;
+        },
+        aiFilterCount(key) {
+          const rows = (this.aiAnalysis && this.aiAnalysis.rows) || [];
+          if (key === 'new') return rows.filter(r => r.status === 'new').length;
+          if (key === 'dup') return rows.filter(r => r.status === 'dup_episode').length;
+          if (key === 'exists') return rows.filter(r => !this.aiSelectable(r)).length;
+          return rows.length;
         },
         aiAllSelected() {
           if (!this.aiAnalysis) return false;
-          const list = this.aiAnalysis.rows.filter(this.aiSelectable);
+          const list = this.aiFilteredRows().filter(this.aiSelectable);
           return list.length > 0 && list.every(row => row.selected);
         },
         aiToggleAll(event) {
           if (!this.aiAnalysis) return;
-          const checked = event.target.checked;
-          this.aiAnalysis.rows.forEach(row => {
+          const checked = (event && event.target) ? !!event.target.checked : !this.aiAllSelected();
+          this.aiFilteredRows().forEach(row => {
             if (this.aiSelectable(row)) row.selected = checked;
           });
+        },
+        // 手机上一屏内完成选择：只勾「可新增」，跳过疑似重复
+        aiSelectOnlyNew() {
+          if (!this.aiAnalysis) return;
+          this.aiAnalysis.rows.forEach(row => { row.selected = row.status === 'new'; });
+          this.showToast('已只勾选「可新增」的条目', 'success');
         },
         aiSelectedCount() {
           if (!this.aiAnalysis) return 0;
@@ -1313,6 +1480,8 @@
               if (!res.success) { this.aiError = res.message || '入库失败'; return; }
               this.aiCommitLog = res.data.log || '(无输出)';
               this.showToast(res.data.ok ? '入库完成' : '入库结束，请看日志', res.data.ok ? 'success' : 'warning');
+              // 重新分析以刷新「已在库」状态；结果出来后滚到日志而不是列表顶部
+              this.aiScrollTarget = 'log';
               this.aiAnalyze();
             })
             .catch(error => { this.aiError = '入库请求失败：' + error; })
@@ -1323,6 +1492,13 @@
           this.aiAnalysis = null;
           this.aiResolved = null;
           this.aiBaselinePath = '';
+          this.aiSelectedCandidate = null;
+          this.aiCandidatesCollapsed = false;
+          this.aiSettingsOpen = false;
+          this.aiFilter = 'all';
+          this.aiScrollTarget = '';
+          if (this.aiSearchTimer) { clearInterval(this.aiSearchTimer); this.aiSearchTimer = null; }
+          this.aiSearching = false;
           this.aiCommitLog = '';
           this.aiError = '';
           this.aiForm.shareurl = '';
