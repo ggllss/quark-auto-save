@@ -361,6 +361,54 @@ _AUX_EXTS = (
 )
 
 
+# 电影文件名里的 release 垃圾（分辨率/来源/编码/音轨/语言标记）
+_MOVIE_JUNK_RE = re.compile(
+    r"(2160p|1080p|720p|480p|4k|uhd|blu-?ray|bluray|remux|web-?dl|webrip|hdtv|"
+    r"x265|x264|h265|h264|hevc|avc|10bit|8bit|hdr10|hdr|dolby|dovi|dv|"
+    r"dts-?hd|dts|truehd|atmos|aac|ac3|eac3|flac|ma|5\.1|7\.1|2\.0|60fps|hfr|"
+    r"proper|repack|extended|hq|国英双语|国语|英语|双语|内封|简英|中字|字幕|"
+    r"蓝光|原盘|合集|臻彩|高码率|高码|无水印|纯净版|外挂|简中|繁中|中英|内嵌|硬字幕|"
+    r"ddp|dd5|dd7|eac3|opus|lpcm|aac2|hdr10\+|hdr10|sdr|dv|国粤|粤语|普通话)",
+    re.I,
+)
+
+
+def _movie_title_year(text):
+    """
+    从电影文件名/目录名里拆出 (片名, 年份)。
+
+    The.Wandering.Earth.2019.2160p.WEB-DL.x265.mkv → ("The Wandering Earth", "2019")
+    流浪地球2（2023）1080p.mkv                       → ("流浪地球2", "2023")
+    """
+    base = _strip_media_ext(str(text or ""))
+    base = base.replace("_", " ").replace(".", " ")
+    # 年份：优先取括号里的，其次取第一个 19xx/20xx
+    year = ""
+    m = re.search(r"[(\[【（［]\s*((?:19|20)\d{2})\s*[)\]】）］]", base)
+    if m:
+        year = m.group(1)
+        base = base[: m.start()] + " " + base[m.end():]
+    else:
+        m = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", base)
+        if m:
+            year = m.group(1)
+            base = base[: m.start()]
+    # 去掉字幕组/其它括号内容
+    base = re.sub(r"[(\[【（［][^)\]】）］]*[)\]】）］]", " ", base)
+    base = re.sub(r"[\s.\-_]+", " ", base).strip(" -_")
+    base = _MOVIE_JUNK_RE.sub(" ", base)
+    base = re.sub(r"\s+", " ", base)
+    # 去掉尾部残留的连接符（「流浪地球2 & 」这种）
+    base = base.strip(" -_&+、,，·")
+    return base, year
+
+
+def _movie_version(name):
+    """电影版本标记：2160p / 1080p / 4K…（同一部片有多个版本时用来区分）"""
+    m = re.search(r"(2160p|1080p|720p|480p|4k|uhd)", str(name or ""), re.I)
+    return m.group(1).lower() if m else ""
+
+
 def _is_aux_file(name):
     """海报/nfo/字幕这类辅助文件，不当作正片处理"""
     return os.path.splitext(str(name or ""))[1].lower() in _AUX_EXTS
@@ -1397,6 +1445,15 @@ def ai_analyze():
     pattern = body.get("pattern") or ""
     replace = body.get("replace") or ""
     want_rule = bool(body.get("suggest_rule"))
+    # 电影走完全不同的路子：没有季集，按「片名 (年份)」建子文件夹
+    category = (body.get("category") or "").strip()
+    if not category:
+        _seg = savepath.strip("/").split("/")
+        for _name in _TYPE_NAMES:
+            if _name in _seg:
+                category = _name
+                break
+    is_movie = category == "电影"
 
     if not shareurl:
         return jsonify({"success": False, "message": "缺少分享链接"})
@@ -1437,7 +1494,7 @@ def ai_analyze():
         return jsonify({"success": False, "message": f"解析分享失败：{e}"})
 
     # ①b 季号：优先信分享内容自带的季号
-    share_seasons = _seasons_in_share(share_list)
+    share_seasons = set() if is_movie else _seasons_in_share(share_list)
     share_season, share_season_hits = _season_from_share(share_list)
     season_note = ""
     multi_season = len(share_seasons) > 1
@@ -1616,6 +1673,25 @@ def ai_analyze():
             else f"{taskname}.S00E{_num:02d}{_ext}"
         )
 
+    # 电影：片名(年份) 建子文件夹；同一部片有多个版本时文件名带版本后缀
+    movie_root = savepath_norm
+    movie_counts = {}
+    if is_movie:
+        _last = movie_root.rstrip("/").rsplit("/", 1)[-1] or ""
+        if _last and _last == (taskname or "").strip():
+            movie_root = movie_root.rstrip("/")[: -(len(_last) + 1)] or "/"
+        for _f in share_list:
+            if _f.get("dir") or _is_aux_file(_f.get("file_name") or ""):
+                continue
+            _d = (_f.get("dir_path") or "").strip().rstrip("/")
+            _s2 = _d.rsplit("/", 1)[-1].strip() if _d else ""
+            _t, _y = _movie_title_year(_s2) if _s2 else ("", "")
+            _ft2, _fy2 = _movie_title_year(_f.get("file_name") or "")
+            _t = _t or _ft2
+            _y = _y or _fy2
+            if _t:
+                movie_counts[(_t, _y)] = movie_counts.get((_t, _y), 0) + 1
+
     # 一个分享里有多季时，每季各自比对各自的目录（不能拿 S04 的文件去比 S01）
     show_root = savepath_norm
     _tail0 = show_root.rstrip("/").rsplit("/", 1)[-1] or ""
@@ -1712,6 +1788,30 @@ def ai_analyze():
                 cmp_names = extra_names + dir_names
                 cmp_content = extra_content + dir_content
                 cmp_se = []
+            elif is_movie:
+                # 片名：分享里该文件所在的最后一层目录名（分享常按片名建目录）；
+                # 年份：优先取文件名里的年份（目录名里通常没有）
+                _dir = (f.get("dir_path") or "").strip().rstrip("/")
+                _seg = _dir.rsplit("/", 1)[-1].strip() if _dir else ""
+                _title, _year = _movie_title_year(_seg) if _seg else ("", "")
+                _ft, _fy = _movie_title_year(name)
+                if not _title:
+                    _title = _ft
+                if not _year:
+                    _year = _fy
+                _title = _title or taskname
+                _label = ("%s (%s)" % (_title, _year)) if _year else _title
+                _ver = _movie_version(name) if movie_counts.get((_title, _year), 0) > 1 else ""
+                _ext = os.path.splitext(name)[1]
+                row["movie_title"] = _title
+                row["movie_year"] = _year
+                row["movie_version"] = _ver
+                row["_movie_name"] = ("%s - %s%s" % (_label, _ver, _ext)) if _ver else ("%s%s" % (_label, _ext))
+                row_target = "%s/%s" % (movie_root.rstrip("/"), _label)
+                row_dir = _label
+                cmp_names = []
+                cmp_content = []
+                cmp_se = []
             else:
                 # 一个链接整季打包时，按文件自己所属的季分别入库
                 row_season = _season_of_text(f.get("dir_path") or "") or _season_of_text(name)
@@ -1746,6 +1846,9 @@ def ai_analyze():
             elif is_aux:
                 in_rule = False          # 辅助文件不套正片规则
                 new_name = name
+            elif is_movie:
+                in_rule = True
+                new_name = row.get("_movie_name") or name
             else:
                 in_rule = (
                     bool(re.search(rule_pattern, name))
@@ -1863,6 +1966,8 @@ def ai_analyze():
         "savepath": savepath_norm,
         "savepath_exists": savepath_exists,
         # 分享内容里识别出的季号（自动套 Sxx 用），以及给用户的说明
+        "movie_mode": is_movie,
+        "movie_root": movie_root if is_movie else "",
         "season_from_share": share_season,
         "share_seasons": sorted(share_seasons),
         "multi_season": multi_season,

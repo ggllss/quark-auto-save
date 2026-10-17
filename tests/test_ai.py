@@ -712,6 +712,37 @@ def test_multi_season_and_aux():
           run._season_of_text("Breaking Bad S05E01 - 第 1 集.mkv"))
 
 
+def test_movie_mode():
+    print("【21】电影：片名(年份) 与版本")
+    import run
+
+    ty = run._movie_title_year
+    check("英文发布名 → 片名+年份",
+          ty("The.Wandering.Earth.2019.2160p.WEB-DL.x265.10bit.HDR.mkv")
+          == ("The Wandering Earth", "2019"),
+          ty("The.Wandering.Earth.2019.2160p.WEB-DL.x265.10bit.HDR.mkv"))
+    check("续集 II 不丢",
+          ty("The.Wandering.Earth.II.2023.BluRay.2160p.DTS-HD.MA.5.1.mkv")[0]
+          == "The Wandering Earth II",
+          ty("The.Wandering.Earth.II.2023.BluRay.2160p.DTS-HD.MA.5.1.mkv"))
+    check("中文目录「流浪地球 (2019) 4K HDR」",
+          ty("流浪地球 (2019) 4K HDR") == ("流浪地球", "2019"),
+          ty("流浪地球 (2019) 4K HDR"))
+    check("全角括号「流浪地球2（2023）」",
+          ty("流浪地球2（2023）1080p") == ("流浪地球2", "2023"),
+          ty("流浪地球2（2023）1080p"))
+    check("尾部连接符被清掉「流浪地球2 & 」",
+          ty("流浪地球2(2023) 4K HDR&DV 外挂简中 ") == ("流浪地球2", "2023"),
+          ty("流浪地球2(2023) 4K HDR&DV 外挂简中 "))
+    check("「高码」算 release 垃圾",
+          ty("流浪地球(2019) 4K 高码 ") == ("流浪地球", "2019"),
+          ty("流浪地球(2019) 4K 高码 "))
+    check("版本标记", run._movie_version("x.2160p.HDR.mkv") == "2160p",
+          run._movie_version("x.2160p.HDR.mkv"))
+    check("没版本标记时为空", run._movie_version("流浪地球.mkv") == "",
+          run._movie_version("流浪地球.mkv"))
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -745,6 +776,7 @@ def main():
     test_multi_source()
     test_season_from_share()
     test_multi_season_and_aux()
+    test_movie_mode()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0

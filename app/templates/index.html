@@ -765,6 +765,13 @@
             <!-- 步骤3：分析结果 + 规则编辑 -->
             <div v-if="aiAnalysis" id="aiAnalysisAnchor" class="ai-has-actionbar">
               <hr>
+              <!-- 电影：按「片名 (年份)」自动命名，不套季集规则 -->
+              <div v-if="aiAnalysis.movie_mode" class="alert alert-info py-2 small">
+                <i class="bi bi-film mr-1"></i>
+                电影模式：按「片名 (年份)」自动建子目录并命名
+                （<code>{{ aiAnalysis.movie_root }}</code> 下每部一个文件夹），
+                同一部片有多个版本时文件名会带 2160p/1080p 区分。
+              </div>
               <!-- 一个分享里有多季 / 按分享内容自动识别出季号时，明确告知 -->
               <div v-if="aiAnalysis.season_note" class="alert alert-info py-2 small">
                 <i class="bi bi-layers mr-1"></i>{{ aiAnalysis.season_note }}
@@ -1648,6 +1655,7 @@
           this.$nextTick(() => this.aiScrollTo('aiAnalyzeProgress'));
           axios.post('/ai/analyze', {
             shareurl: this.aiForm.shareurl,
+            category: this.aiForm.category || '',
             savepath: this.aiForm.savepath,
             taskname: this.aiForm.taskname,
             pattern: this.aiForm.pattern,
