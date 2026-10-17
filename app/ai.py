@@ -143,6 +143,7 @@ _PARSE_SYSTEM = """你是影视资源检索助手。用户会给你一句想追�
 {
   "title": "剧名（去掉季/年份等修饰，用于匹配媒体库）",
   "season": 4,
+  "category": "电视剧",
   "aliases": ["可能的别名或简称"],
   "queries": ["用于调搜索接口的关键词，按优先级从精确到宽泛，2-4个"]
 }
@@ -150,6 +151,10 @@ _PARSE_SYSTEM = """你是影视资源检索助手。用户会给你一句想追�
 规则：
 - title 只保留剧名主体，例如「现在就出发 第四季」→ title 为「现在就出发」，season 为 4。
 - season 识别不到就填 null。
+- category 只能从这五个里选一个：电影、电视剧、动漫、综艺、纪录片。按剧名判断：
+  动画/番剧/国漫/日漫类选「动漫」；真人连续剧、韩剧、美剧选「电视剧」；
+  单部影片选「电影」；真人秀、脱口秀、竞技、访谈、真人户外类选「综艺」；
+  自然/历史/科学纪实类选「纪录片」。拿不准时选「电视剧」。
 - queries 要包含「剧名+季」和「剧名」两种，供搜索接口多次尝试。
 - 只输出 JSON。"""
 
@@ -220,6 +225,7 @@ def fallback_parse_intent(keyword):
     return {
         "title": title or keyword,
         "season": season,
+        "category": guess_category(keyword),
         "aliases": [],
         "queries": uniq or [keyword],
         "source": "local",
@@ -237,6 +243,10 @@ def _normalize_intent(raw, keyword):
         season = int(season)
     if not isinstance(season, int) or season <= 0:
         season = None
+
+    category = str(raw.get("category") or "").strip()
+    if category not in MEDIA_TYPES:
+        category = ""
 
     # 模型有时把数组字段返回成字符串（"queries": "剧名 第1季"），
     # 直接迭代会逐字符拆分，这里先归一成列表
@@ -265,7 +275,114 @@ def _normalize_intent(raw, keyword):
             seen.add(q)
             uniq.append(q)
 
-    return {"title": title, "season": season, "aliases": aliases, "queries": uniq[:5]}
+    return {"title": title, "season": season, "category": category,
+            "aliases": aliases, "queries": uniq[:5]}
+
+
+# --------------------------------------------------------------------------
+# ①-b 媒体类型与目标文件夹匹配
+# --------------------------------------------------------------------------
+
+MEDIA_TYPES = ["电视剧", "电影", "动漫", "综艺", "纪录片"]
+
+# 分类关键词（无 AI 时的启发式兜底，拿不准返回空串由调用方决定默认值）
+_CATEGORY_HINTS = [
+    ("动漫", ["动漫", "动画", "番剧", "国漫", "日漫", "新番"]),
+    ("综艺", ["综艺", "真人秀", "脱口秀", "访谈", "选秀", "大赛"]),
+    ("纪录片", ["纪录片", "纪实"]),
+    ("电影", ["电影", "影片"]),
+]
+
+# 目录名里的季标记：S02 / 第二季 / 第2季 / 尾部裸数字（如「喜人奇妙夜2」）
+_SEASON_IN_NAME = re.compile(
+    r"(?:[.\s_\-]*[Ss](\d{1,2}))$"
+    r"|(?:[.\s_\-]*第\s*([0-9一二三四五六七八九十]+)\s*季)$"
+    r"|(?<=[^\d])(\d{1,2})$"
+)
+
+
+def guess_category(text):
+    """无 AI 时按关键词猜类型；猜不到返回空串"""
+    text = (text or "").lower()
+    for category, words in _CATEGORY_HINTS:
+        if any(w in text for w in words):
+            return category
+    return ""
+
+
+def normalize_name(name):
+    """归一化名称用于比较：去空白与常见标点、统一小写"""
+    name = (name or "").strip().lower()
+    return re.sub(r"[\s\-_.·,，。:：;；!！?？'\"“”‘’()（）\[\]【】《》<>]+", "", name)
+
+
+def split_season(name):
+    """
+    把目录名拆成 (主体, 季号)，识别不到季号时返回 (原名, None)。
+    让「中餐厅」能匹配上「中餐厅S09」、「喜人奇妙夜」能匹配上「喜人奇妙夜2」。
+    """
+    name = (name or "").strip()
+    m = _SEASON_IN_NAME.search(name)
+    if not m:
+        return name, None
+    token = m.group(1) or m.group(2) or m.group(3)
+    season = int(token) if token and token.isdigit() else _CN_NUM.get(token or "")
+    if not season:
+        return name, None
+    stem = name[: m.start()].strip(" ._-·")
+    if len(normalize_name(stem)) < 2:
+        return name, None
+    return stem, season
+
+
+def match_folder(title, aliases, dir_names, threshold=0.75, season=None):
+    """
+    在候选目录名里找最匹配剧名的那一个（「历史文件夹」）。
+    返回 (命中的目录名, 置信度, 命中说明)；没找到时第一项为 None。
+    season 给定时参与打分：季号一致加分，季号不符重罚（避免「第十季」匹配到 S09）。
+    """
+    if not title or not dir_names:
+        return None, 0.0, ""
+
+    keys = []
+    base = normalize_name(title)
+    if base:
+        keys.append((base, "剧名"))
+    for alias in aliases or []:
+        na = normalize_name(alias)
+        if na and na != base:
+            keys.append((na, "别名"))
+
+    best = (None, 0.0, "")
+    for dir_name in dir_names:
+        stem, cand_season = split_season(dir_name)
+        cand_full = normalize_name(dir_name)
+        cand_stem = normalize_name(stem)
+        for key, how in keys:
+            if not key:
+                continue
+            if key == cand_full:
+                score, way = 1.0, how + "完全一致"
+            elif key == cand_stem:
+                score, way = 0.95, how + "一致（目录名带季号）"
+            elif cand_stem.startswith(key) or key.startswith(cand_stem):
+                ratio = min(len(key), len(cand_stem)) / max(len(key), len(cand_stem))
+                score, way = 0.8 * ratio, how + "前缀匹配"
+            elif key in cand_full or cand_full in key:
+                ratio = min(len(key), len(cand_full)) / max(len(key), len(cand_full))
+                score, way = 0.6 * ratio, how + "部分包含"
+            else:
+                continue
+            if season:
+                if cand_season == season:
+                    score, way = min(1.0, score + 0.05), way + "·季号一致"
+                elif cand_season:
+                    score, way = score * 0.3, way + "·季号不符"
+            if score > best[1]:
+                best = (dir_name, score, way)
+    if best[0] and best[1] < threshold:
+        return None, best[1], best[2]
+    return best
 
 
 # --------------------------------------------------------------------------

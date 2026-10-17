@@ -413,6 +413,193 @@ def ai_test():
         return jsonify({"success": False, "message": f"AI 连接失败：{e}"})
 
 
+# --------------------------------------------------------------------------
+# AI 追剧：媒体类型与入库路径解析
+# --------------------------------------------------------------------------
+
+_TYPE_NAMES = ["电视剧", "电影", "动漫", "综艺", "纪录片"]
+
+
+def _infer_media_roots():
+    """
+    未显式配置类型根目录时，从现有任务的保存路径推断。
+    例如任务存于 /0-影音/综艺/现在就出发/S04，可推出「综艺」根目录是 /0-影音/综艺，
+    其余类型用同一父目录（/0-影音）补齐，这样开箱即可用。
+    """
+    found, base = {}, ""
+    for task in (config_data.get("tasklist") or []):
+        if not isinstance(task, dict):
+            continue
+        segments = [s for s in (task.get("savepath") or "").strip().split("/") if s]
+        for i, seg in enumerate(segments):
+            if seg in _TYPE_NAMES:
+                found.setdefault(seg, "/" + "/".join(segments[: i + 1]))
+                if i > 0 and not base:
+                    base = "/" + "/".join(segments[:i])
+                break
+    if not found:
+        return {}
+    return {n: (found.get(n) or ((base + "/" + n) if base else "")) for n in _TYPE_NAMES}
+
+
+def _media_roots():
+    """各类型根目录：显式配置优先，缺的用推断值补齐"""
+    configured = (config_data.get("ai") or {}).get("media_roots") or {}
+    roots = {}
+    if isinstance(configured, dict):
+        roots = {k: (v or "").strip() for k, v in configured.items() if (v or "").strip()}
+    inferred = _infer_media_roots()
+    for name in _TYPE_NAMES:
+        if not roots.get(name) and inferred.get(name):
+            roots[name] = inferred[name]
+    return roots
+
+
+def _list_dir_items(path):
+    """列出目录下的条目；目录不存在返回 None，读取失败抛异常"""
+    account = _require_cookie()
+    if account is None:
+        raise RuntimeError("未配置 Cookie")
+    fids = account.get_fids([path])
+    if not fids:
+        return None
+    ret = account.ls_dir(fids[0]["fid"])
+    return (ret.get("data", {}) or {}).get("list") or []
+
+
+def _resolve_media_path(title, aliases=None, season=None, category=""):
+    """
+    按类型 + 剧名算出目标入库路径：
+    - 在对应类型目录下找同名文件夹（已存在的「历史文件夹」），命中就存进去
+    - 没命中就用剧名新建，并在返回里标明「将新建」
+    - 分季时在剧集文件夹下再套一层 S0X（目录名自带相同季号则不重复套）
+    """
+    roots = _media_roots()
+    aliases = aliases or []
+    matched_folder, match_score, match_note = None, 0.0, ""
+    category_source = "manual" if category in roots else ""
+
+    # 没指定类型时，到各类型目录里找已有文件夹，命中即可反推类型。
+    # 判类型时不带季号（同一部剧换季不会换类型），找具体文件夹时才用季号消歧。
+    # 同时记下该剧在库里的命名习惯：季号是写在文件夹名里（中餐厅S10），还是用 S0X 子目录。
+    season_in_name, style_stem = False, ""
+    if not category and title:
+        best_type = None
+        for name in _TYPE_NAMES:
+            root = roots.get(name)
+            if not root:
+                continue
+            try:
+                items = _list_dir_items(root)
+            except Exception:
+                continue
+            if items is None:
+                continue
+            dirs = [f["file_name"] for f in items if f.get("dir")]
+            hit, score, note = ai.match_folder(title, aliases, dirs)
+            if hit and (best_type is None or score > best_type[1]):
+                best_type = (name, score, hit, note)
+        if best_type:
+            category, category_source = best_type[0], "existing_folder"
+            stem, dir_season = ai.split_season(best_type[2])
+            if dir_season:
+                season_in_name, style_stem = True, stem
+
+    if category not in roots:
+        category = "电视剧" if "电视剧" in roots else (next(iter(roots), "") or "电视剧")
+        if not category_source:
+            category_source = "default"
+
+    result = {
+        "category": category,
+        "category_source": category_source,
+        "season": season,
+        "root": roots.get(category, ""),
+        "roots": roots,
+        "matched_folder": matched_folder,
+        "match_score": round(match_score, 2),
+        "match_note": match_note,
+        "folder_exists": bool(matched_folder),
+        "season_dir": "",
+        "season_exists": False,
+        "savepath": "",
+        "create_dirs": [],
+        "note": "",
+    }
+    root = result["root"]
+    if not root:
+        result["note"] = "未找到「%s」的根目录，请在 AI 设置里填写各类型目录" % category
+        return result
+
+    folder_name = ""
+    if title:
+        try:
+            items = _list_dir_items(root)
+        except Exception as e:
+            result["note"] = "读取类型目录失败：%s" % e
+            return result
+        if items is None:
+            result["note"] = "类型目录不存在：%s" % root
+            return result
+        dirs = [f["file_name"] for f in items if f.get("dir")]
+        hit, score, note = ai.match_folder(title, aliases, dirs, season=season)
+        result["match_score"] = round(score, 2)
+        result["match_note"] = note or "未找到同名文件夹"
+        if hit:
+            folder_name = hit
+            result.update({"matched_folder": hit, "folder_exists": True})
+        elif season and season_in_name and style_stem:
+            # 库里这部剧本季是写在文件夹名里的（如「中餐厅S10」），新一季沿用同样形式，
+            # 避免出现「中餐厅S09」与「中餐厅/S11」两种风格并存
+            folder_name = "%sS%02d" % (style_stem, int(season))
+            result["match_note"] = "沿用库内「剧名+季号」命名习惯"
+        else:
+            folder_name = title
+
+    if not folder_name:
+        result["note"] = "缺少剧名，无法确定入库目录"
+        return result
+
+    # 分季：目录名已经带相同季号就不再套一层，避免出现「中餐厅S09/S09」
+    season_dir = ""
+    if season:
+        _, dir_season = ai.split_season(folder_name)
+        if dir_season != season:
+            season_dir = "S%02d" % int(season)
+    result["season_dir"] = season_dir
+
+    show_path = "/".join([root.rstrip("/"), folder_name])
+    savepath = "/".join([show_path] + ([season_dir] if season_dir else []))
+    result["savepath"] = savepath
+
+    create_dirs = []
+    if not result["folder_exists"]:
+        create_dirs.append(show_path)
+    if season_dir:
+        season_exists = False
+        if result["folder_exists"]:
+            try:
+                items = _list_dir_items(show_path) or []
+                season_exists = any(
+                    f.get("dir")
+                    and ai.normalize_name(f["file_name"]) == ai.normalize_name(season_dir)
+                    for f in items
+                )
+            except Exception:
+                season_exists = False
+        result["season_exists"] = season_exists
+        if not season_exists:
+            create_dirs.append(savepath)
+
+    result["create_dirs"] = create_dirs
+    if create_dirs:
+        result["note"] = "将新建：" + "、".join(create_dirs)
+    else:
+        result["note"] = "命中已有文件夹「%s」（%s）" % (
+            folder_name, result["match_note"] or "同名")
+    return result
+
+
 def _enabled_sources():
     """当前已启用的搜索源名称列表"""
     src = config_data.get("source", {}) or {}
@@ -422,6 +609,31 @@ def _enabled_sources():
         if str(cfg.get("enable", "true")).lower() == "true" and cfg.get("server"):
             names.append(label)
     return names
+
+
+@app.route("/ai/resolve_path", methods=["POST"])
+def ai_resolve_path():
+    """按类型 + 剧名解析入库路径：命中已有文件夹，还是需要新建；分季是否要套 S0X"""
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    body = request.json or {}
+    title = (body.get("title") or "").strip()
+    aliases = body.get("aliases") or []
+    category = (body.get("category") or "").strip()
+    season = body.get("season")
+    if season in ("", "null", None):
+        season = None
+    else:
+        try:
+            season = int(season)
+        except (TypeError, ValueError):
+            season = None
+    try:
+        data = _resolve_media_path(title, aliases, season, category)
+    except Exception as e:
+        return jsonify({"success": False, "message": f"解析入库路径失败：{e}"})
+    data["category_options"] = _TYPE_NAMES
+    return jsonify({"success": True, "data": data})
 
 
 @app.route("/ai/search", methods=["POST"])
@@ -473,6 +685,13 @@ def ai_search():
         }
 
     sources = _enabled_sources()
+    try:
+        resolved = _resolve_media_path(
+            intent.get("title"), intent.get("aliases"),
+            intent.get("season"), intent.get("category") or "",
+        )
+    except Exception as e:
+        resolved = {"note": f"解析入库路径失败：{e}", "savepath": "", "create_dirs": []}
     hint = ""
     if not pool:
         if not sources:
@@ -495,6 +714,7 @@ def ai_search():
                 "pool_size": len(pool),
                 "candidates": candidates,
                 "baseline": baseline,
+                "resolved": resolved,
                 "hint": hint,
             },
         }
