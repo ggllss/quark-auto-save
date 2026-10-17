@@ -775,6 +775,16 @@
                     <input type="text" class="form-control form-control-sm" v-model="aiForm.savepath">
                   </div>
                 </div>
+                <div class="col-6 col-md-2">
+                  <div class="form-group mb-2">
+                    <label class="small mb-0" title="花絮素材按「起点+期号-1」编号，和 TMDB 的集数对齐">
+                      第1期对应集数
+                    </label>
+                    <input type="number" min="0" class="form-control form-control-sm"
+                           v-model.number="aiForm.episodeBase"
+                           @change="aiAnalyze()" placeholder="留空用期号">
+                  </div>
+                </div>
               </div>
 
               <!-- 目标文件夹判定：命中已有文件夹，还是需要新建（分季会补一层 S0X） -->
@@ -1269,7 +1279,9 @@
           replace: "",
           // 媒体类型与季号：用于自动定位「类型目录 / 剧名文件夹 / S0X」
           category: "",
-          season: ""
+          season: "",
+          // 花絮素材的集数起点：第1期对应的真实集数（如 TMDB 的 138），留空则用期号
+          episodeBase: null
         },
         aiSearching: false,
         aiAnalyzing: false,
@@ -1483,6 +1495,7 @@
             taskname: this.aiForm.taskname,
             pattern: this.aiForm.pattern,
             replace: this.aiForm.replace,
+            episode_base: this.aiForm.episodeBase || 0,
             suggest_rule: !!suggestRule
           })
             .then(response => {
@@ -1497,6 +1510,10 @@
               const data = res.data;
               data.rows.forEach(row => { row.selected = !!row.default_selected; });
               this.aiAnalysis = data;
+              // 回显后端采用的集数起点，避免下次分析丢失
+              if (data.episode_base !== undefined) {
+                this.aiForm.episodeBase = data.episode_base || null;
+              }
               this.aiFilter = 'all';
               if (suggestRule && data.rule_suggestion && !data.rule_suggestion.error) {
                 const sug = data.rule_suggestion;
@@ -1646,7 +1663,9 @@
               file_name: row.file_name,
               new_name: row.new_name,
               // 文件在分享里的所在目录：后端按目录分批转存
-              parent_fid: row.parent_fid || ''
+              parent_fid: row.parent_fid || '',
+              // 花絮素材的目标目录（S00）：后端按「分享目录 + 目标目录」分批
+              target_savepath: row.target_savepath || ''
             }))
           })
             .then(response => {

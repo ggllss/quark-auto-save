@@ -997,6 +997,21 @@ def _is_extra_file(name):
     return any(m in low for m in EXTRA_MARKERS)
 
 
+def extra_episode_number(name, episode_base=0, seq=0):
+    """
+    花絮素材该用第几集：
+      - 文件名里有「第N期」且有集数起点 → 起点 + N - 1（和 TMDB 的集数对齐）
+      - 有期号但没起点 → 直接用期号
+      - 没有期号（先导片/回顾特辑等）→ 用顺序号
+    """
+    period = (content_key(name) or {}).get("period")
+    if period and episode_base:
+        return episode_base + period - 1
+    if period:
+        return period
+    return seq
+
+
 def _extra_label(name, taskname=""):
     """从花絮文件名里提取可读描述：去掉开头的日期和剧名前缀"""
     stem = os.path.splitext(name or "")[0]
@@ -1214,7 +1229,17 @@ def ai_analyze():
         except Exception:
             resolved_names = {}
 
-    # 花絮素材命名：{剧名}.S00E{序号}.{原描述}.{EXT}，按文件名排序赋号（时间顺序）
+    # 花絮素材的集数：用「集数起点」把期号换算成真实集数
+    # （如 S04 第1期在 TMDB 是第 138 集 → 起点填 138，则第N期 = 137+N）。
+    # 留空则用期号本身，没有期号的（先导片/回顾特辑等）用顺序号。
+    try:
+        episode_base = int(body.get("episode_base") or 0)
+    except (TypeError, ValueError):
+        episode_base = 0
+    if episode_base < 0:
+        episode_base = 0
+
+    # 花絮素材命名：{剧名}.S00E{集数}.{原描述}.{EXT}，按文件名排序赋号（时间顺序）
     extra_new = {}
     _extras = sorted(
         [f for f in share_list if not f.get("dir") and _is_extra_file(f.get("file_name"))],
@@ -1230,10 +1255,11 @@ def ai_analyze():
         _fn = _f.get("file_name") or ""
         _stem, _ext = os.path.splitext(_fn)
         _label = _extra_label(_fn, taskname)
+        _num = extra_episode_number(_fn, episode_base, _i)
         extra_new[_f.get("fid")] = (
-            f"{taskname}.S00E{_i:02d}.{_label}{_ext}"
+            f"{taskname}.S00E{_num:02d}.{_label}{_ext}"
             if _label
-            else f"{taskname}.S00E{_i:02d}{_ext}"
+            else f"{taskname}.S00E{_num:02d}{_ext}"
         )
 
     # 库里已有文件的季集索引，用于识别「同一集但文件名不同」的重复
@@ -1402,6 +1428,7 @@ def ai_analyze():
         "savepath_exists": savepath_exists,
         "dir_note": dir_note,
         "extra_dir": extra_dir,
+        "episode_base": episode_base,
         "extra_exists": extra_exists,
         "extra_note": extra_note,
         "dir_file_count": len(dir_names),

@@ -508,6 +508,20 @@ def test_extra_routing():
     check("无前缀时保留原描述",
           run._extra_label("先导片上.mp4") == "先导片上",
           run._extra_label("先导片上.mp4"))
+    # 集数换算：和 TMDB 集数对齐
+    check("第1期 + 起点138 → 第138集",
+          run.extra_episode_number("20261012-第1期加更.mp4", 138) == 138,
+          run.extra_episode_number("20261012-第1期加更.mp4", 138))
+    check("第3期 + 起点138 → 第140集",
+          run.extra_episode_number("第3期加更.mp4", 138) == 140,
+          run.extra_episode_number("第3期加更.mp4", 138))
+    check("没填起点时用期号",
+          run.extra_episode_number("20261012-第1期加更.mp4", 0) == 1,
+          run.extra_episode_number("20261012-第1期加更.mp4", 0))
+    check("没有期号的用顺序号",
+          run.extra_episode_number("先导片上.mp4", 138, 7) == 7,
+          run.extra_episode_number("先导片上.mp4", 138, 7))
+
     check("描述里的非法字符被清掉",
           "/" not in run._extra_label("花絮/特辑.mp4"),
           run._extra_label("花絮/特辑.mp4"))
