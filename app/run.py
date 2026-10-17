@@ -29,6 +29,7 @@ import base64
 import sys
 import os
 import re
+import time
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, parent_dir)
@@ -600,6 +601,59 @@ def _resolve_media_path(title, aliases=None, season=None, category=""):
     return result
 
 
+# 搜索结果缓存：同一关键词短时间内重复搜索直接复用，避免反复等公共搜索源
+_SEARCH_CACHE = {}
+_SEARCH_CACHE_TTL = 600  # 秒
+
+
+def _search_cache_get(key):
+    hit = _SEARCH_CACHE.get(key)
+    if not hit:
+        return None
+    ts, value = hit
+    if time.time() - ts > _SEARCH_CACHE_TTL:
+        _SEARCH_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _search_cache_put(key, value):
+    if len(_SEARCH_CACHE) > 60:
+        _SEARCH_CACHE.clear()
+    _SEARCH_CACHE[key] = (time.time(), value)
+
+
+def _name_is_relevant(title, aliases, candidate_name):
+    """候选标题里是否真的含这部剧的名字，用来挡掉完全无关的链接"""
+    name = ai.normalize_name(candidate_name)
+    if not name:
+        return False
+    keys = [ai.normalize_name(title)]
+    keys += [ai.normalize_name(a) for a in (aliases or [])]
+    keys = [k for k in keys if k]
+    if not keys:
+        return True
+    return any(k in name for k in keys)
+
+
+def _link_alive(account, shareurl):
+    """
+    检查分享链接是否仍然有效。
+    返回 True=有效 / False=已失效 / None=网络异常无法判断（保留，避免误杀）
+    """
+    try:
+        pwd_id, passcode, _pdir, _ = account.extract_url(shareurl)
+        ret = account.get_stoken(pwd_id, passcode)
+        status = ret.get("status")
+        if status == 200:
+            return True
+        if status == 500:  # 网络异常，判断不了
+            return None
+        return False
+    except Exception:
+        return None
+
+
 def _enabled_sources():
     """当前已启用的搜索源名称列表"""
     src = config_data.get("source", {}) or {}
@@ -652,26 +706,75 @@ def ai_search():
 
     def gather():
         pool, seen = [], set()
-        for query in queries:
-            try:
-                for item in _collect_suggestions(query, False):
+        if not queries:
+            return pool
+        # 多个检索词并行打源：串行时最坏要等 N 倍，并行只等最慢的那个
+        with ThreadPoolExecutor(max_workers=min(3, len(queries))) as ex:
+            futures = [ex.submit(_collect_suggestions, q, False) for q in queries]
+            for fut in as_completed(futures):
+                try:
+                    items = fut.result() or []
+                except Exception:
+                    continue
+                for item in items:
                     url = item.get("shareurl") or ""
                     if url and url not in seen:
                         seen.add(url)
                         pool.append(item)
-            except Exception:
-                continue
         return pool
 
-    pool = gather()
+    cache_key = "|".join([keyword.lower(), intent.get("title") or ""])
+    cached = _search_cache_get(cache_key)
     retried = False
-    # 公共搜索源（如 PanSou）会偶发限流/超时，而 SDK 内部吞掉了异常只返回空列表，
-    # 表现为「搜不到」。空结果时补一次，尽量把偶发失败和真的没有资源区分开。
-    if not pool and queries:
-        retried = True
+    if cached is not None:
+        pool, from_cache = cached, True
+    else:
+        from_cache = False
         pool = gather()
+        # 公共搜索源偶发限流/超时会返回空列表，空结果时补一次
+        if not pool and queries:
+            retried = True
+            pool = gather()
+        _search_cache_put(cache_key, pool)
 
-    candidates = ai.rank_links(intent, pool[:60], client) if pool else []
+    # ① 相关性过滤：标题里完全不含剧名/别名的，直接挡掉
+    title = intent.get("title") or keyword
+    aliases = intent.get("aliases") or []
+    relevant = [c for c in pool if _name_is_relevant(title, aliases, c.get("taskname") or "")]
+    dropped_irrelevant = len(pool) - len(relevant)
+
+    # ② 排序（AI 参与）
+    ranked = ai.rank_links(intent, relevant[:60], client) if relevant else []
+
+    # ③ 模型给出评分时，丢掉明显不相关的低分项
+    dropped_low_score = 0
+    if ranked and ranked[0].get("rank_source") == "ai":
+        kept = [c for c in ranked if (c.get("score") or 0) >= 40]
+        dropped_low_score = len(ranked) - len(kept)
+        ranked = kept
+
+    # ④ 存活检测：只查靠前的候选，已失效的链接不展示（用户说的「无效链接」）
+    dropped_dead = 0
+    candidates = ranked[:20]
+    if candidates:
+        account = _require_cookie()
+        if account is not None:
+            flags = {}
+            with ThreadPoolExecutor(max_workers=6) as ex:
+                futures = {ex.submit(_link_alive, account, c["shareurl"]): c for c in candidates}
+                for fut in as_completed(futures):
+                    item = futures[fut]
+                    try:
+                        flags[item["shareurl"]] = fut.result()
+                    except Exception:
+                        flags[item["shareurl"]] = None
+            kept = []
+            for c in candidates:
+                if flags.get(c["shareurl"]) is False:
+                    dropped_dead += 1
+                else:
+                    kept.append(c)
+            candidates = kept
 
     task, reason = _match_task_by_title(intent.get("title") or "")
     baseline = None
@@ -701,6 +804,11 @@ def ai_search():
                 "搜索源（%s）没有返回结果：可能是被限流或超时，也可能确实没有资源。"
                 "建议稍后重试，或换个更宽泛的关键词。" % "、".join(sources)
             )
+    elif not candidates:
+        hint = (
+            "搜到 %d 条，但都不是这部剧的资源（已按剧名过滤，并剔除了失效链接）。"
+            "换个更准确的名字试试，或在设置里手动填保存路径。" % len(pool)
+        )
 
     return jsonify(
         {
@@ -711,7 +819,13 @@ def ai_search():
                 "ai_used": intent.get("source") == "ai",
                 "sources": sources,
                 "retried": retried,
+                "from_cache": from_cache,
                 "pool_size": len(pool),
+                "filtered": {
+                    "irrelevant": dropped_irrelevant,
+                    "dead": dropped_dead,
+                    "low_score": dropped_low_score,
+                },
                 "candidates": candidates,
                 "baseline": baseline,
                 "resolved": resolved,
@@ -719,6 +833,56 @@ def ai_search():
             },
         }
     )
+
+
+def _expand_share_files(account, pwd_id, stoken, root_fid="", max_depth=2, max_files=300):
+    """
+    递归展开分享里的文件夹，返回「文件级」条目（带所在目录）。
+
+    分享常见结构是「剧名/S04/E01.mkv」这种嵌套，用户要选的是哪几集，
+    而不是「哪个文件夹」。超过深度或数量上限的文件夹原样保留为一条，
+    并标记 expanded=False，避免静默丢掉内容。
+    返回 (条目列表, 是否被截断)
+    """
+    items, truncated = [], False
+
+    def walk(fid, path, depth):
+        nonlocal truncated
+        if len(items) >= max_files:
+            truncated = True
+            return
+        try:
+            detail = account.get_detail(pwd_id, stoken, fid)
+        except Exception:
+            return
+        if detail.get("code") != 0:
+            return
+        for it in (detail.get("data") or {}).get("list") or []:
+            if len(items) >= max_files:
+                truncated = True
+                return
+            name = it.get("file_name") or ""
+            is_dir = bool(it.get("dir"))
+            if is_dir and depth < max_depth:
+                walk(it.get("fid"), path + name + "/", depth + 1)
+                continue
+            items.append(
+                {
+                    "fid": it.get("fid"),
+                    "file_name": name,
+                    "dir": is_dir,
+                    "size": it.get("size"),
+                    "updated_at": it.get("updated_at"),
+                    "include_items": it.get("include_items"),
+                    # 该文件在分享里所属目录的 fid（转存时要按目录分批）
+                    "parent_fid": fid,
+                    "dir_path": path,
+                    "expanded": not is_dir,
+                }
+            )
+
+    walk(root_fid, "", 0)
+    return items, truncated
 
 
 def _extract_se(name, mr):
@@ -808,11 +972,13 @@ def ai_analyze():
         share_list = detail["data"].get("list") or []
         if not share_list:
             return jsonify({"success": False, "message": "分享为空，文件可能已被删除"})
-        # 与转存引擎一致：只有一个文件夹时自动深入一层
-        if len(share_list) == 1 and share_list[0].get("dir"):
-            inner = account.get_detail(pwd_id, stoken, share_list[0]["fid"])
-            if inner.get("code") == 0 and inner["data"].get("list"):
-                share_list = inner["data"]["list"]
+        # 分享常常是「剧名/S04/E01.mkv」这种嵌套结构，用户要选的是文件。
+        # 递归展开文件夹，直接列出每一集（超过上限的文件夹仍作为一行保留）
+        share_list, truncated = _expand_share_files(
+            account, pwd_id, stoken, pdir_fid or ""
+        )
+        if not share_list:
+            return jsonify({"success": False, "message": "分享为空，文件可能已被删除"})
     except Exception as e:
         return jsonify({"success": False, "message": f"解析分享失败：{e}"})
 
@@ -864,13 +1030,30 @@ def ai_analyze():
             "updated_at": f.get("updated_at"),
             "include_items": f.get("include_items"),
             "new_name": name,
+            # 文件在分享里所处的目录（展开后用于显示来源、转存时按目录分批）
+            "parent_fid": f.get("parent_fid") or "",
+            "dir_path": f.get("dir_path") or "",
         }
         if is_dir:
             exists = name in dir_names
+            _stem, folder_season = ai.split_season(name)
+            # 走到这里说明该文件夹没能展开（层级太深或文件过多）
+            base_hint = (
+                "分享里这一层是文件夹且未展开（层级较深或文件过多），"
+                "只能整包转存，里面的文件名不能单独修改。"
+            )
+            if folder_season:
+                status_text = "第 %d 季文件夹" % folder_season
+                dir_hint = "这是分享里的第 %d 季文件夹。" % folder_season + base_hint
+            else:
+                status_text = "文件夹（未展开）"
+                dir_hint = base_hint
             row.update(
                 {
                     "status": "folder",
-                    "status_text": "文件夹（整体转存）",
+                    "status_text": status_text,
+                    "folder_season": folder_season,
+                    "dir_hint": dir_hint,
                     "in_rule": True,
                     "exists": exists,
                     "default_selected": not exists,
@@ -928,6 +1111,9 @@ def ai_analyze():
         "dir_note": dir_note,
         "dir_file_count": len(dir_names),
         "dir_files": dir_names[:100],
+        # 分享里的文件夹已递归展开成文件；被截断时提示一下
+        "truncated": truncated,
+        "expanded_count": sum(1 for r in rows if r.get("dir_path")),
         "rule": {
             "pattern": pattern,
             "replace": replace,
@@ -978,16 +1164,15 @@ def ai_commit():
     if account is None:
         return jsonify({"success": False, "message": "请先在系统配置里填写 Cookie"})
 
-    fid_list = [f.get("fid") for f in files if f.get("fid")]
-    if not fid_list:
-        return jsonify({"success": False, "message": "勾选的条目缺少 fid"})
-
-    # 最终文件名映射：值为空字符串表示保持原文件名
-    rename_map = {}
+    # 勾选的条目可能来自分享里的不同目录（文件夹已展开成文件），
+    # 转存引擎一次只处理一个目录，所以按目录分批转存
+    groups = {}
     for f in files:
-        orig = f.get("file_name") or ""
-        if orig:
-            rename_map[orig] = (f.get("new_name") or "").strip()
+        if not f.get("fid"):
+            continue
+        groups.setdefault(f.get("parent_fid") or "", []).append(f)
+    if not groups:
+        return jsonify({"success": False, "message": "勾选的条目缺少 fid"})
 
     savepath_norm = re.sub(r"/{2,}", "/", f"/{savepath}")
     # 目标目录不存在则创建（新剧入库场景）
@@ -997,37 +1182,58 @@ def ai_commit():
     except Exception:
         pass
 
-    task = {
-        "taskname": taskname,
-        "shareurl": shareurl,
-        "savepath": savepath_norm,
-        # 成员资格由用户勾选（fid_list）决定；pattern 放开为全匹配，
-        # 文件名一律由 rename_map 给出，避免规则再次筛掉用户选中的文件
-        "pattern": ".*",
-        "replace": "",
-        "fid_list": fid_list,
-        "rename_map": rename_map,
-    }
+    try:
+        pwd_id, _passcode, root_pdir, _ = account.extract_url(shareurl)
+    except Exception:
+        pwd_id, root_pdir = None, ""
 
     import contextlib
     import io
 
     buf = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buf):
-            tree = account.do_save_task(task)
-        ok = bool(tree)
-    except Exception as e:
-        buf.write(f"\n转存异常：{e}\n{traceback.format_exc()}")
-        ok = False
+    ok_all = True
+    renamed = 0
+    for parent_fid, group in groups.items():
+        rename_map = {}
+        for f in group:
+            orig = f.get("file_name") or ""
+            if orig:
+                rename_map[orig] = (f.get("new_name") or "").strip()
+        renamed += len(rename_map)
+
+        # 分享根目录用原链接；子目录用 #/list/share/<fid> 定位
+        sub_url = shareurl
+        if parent_fid and str(parent_fid) != str(root_pdir or ""):
+            sub_url = "https://pan.quark.cn/s/%s#/list/share/%s" % (pwd_id, parent_fid)
+
+        task = {
+            "taskname": taskname,
+            "shareurl": sub_url,
+            "savepath": savepath_norm,
+            # 成员资格由用户勾选（fid_list）决定；pattern 放开为全匹配，
+            # 文件名一律由 rename_map 给出，避免规则再次筛掉用户选中的文件
+            "pattern": ".*",
+            "replace": "",
+            "fid_list": [f["fid"] for f in group],
+            "rename_map": rename_map,
+        }
+        buf.write("—— %s（%d 个文件）\n" % (parent_fid or "分享根目录", len(group)))
+        try:
+            with contextlib.redirect_stdout(buf):
+                tree = account.do_save_task(task)
+            ok_all = ok_all and bool(tree)
+        except Exception as e:
+            buf.write("转存异常：%s\n%s\n" % (e, traceback.format_exc()))
+            ok_all = False
 
     return jsonify(
         {
             "success": True,
             "data": {
-                "ok": ok,
-                "renamed": len(rename_map),
-                "log": buf.getvalue().strip()[-4000:],
+                "ok": ok_all,
+                "renamed": renamed,
+                "batches": len(groups),
+                "log": buf.getvalue().strip()[-6000:],
             },
         }
     )

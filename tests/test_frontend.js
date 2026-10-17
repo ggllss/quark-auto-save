@@ -452,6 +452,18 @@ async function testMobileInteraction() {
   check('手机端把原有浮动按钮抬高避让', html.includes('.bottom-buttons { bottom: 84px; }'));
   check('入库后有日志锚点可自动滚到结果', html.includes('id="aiCommitLogAnchor"'));
   check('搜索时显示已等待秒数', html.includes('已等待 <b>{{ aiSearchElapsed }}</b> 秒'));
+  check('展示过滤掉的无关/失效链接数', html.includes('条失效链接'));
+
+  // S04 这类季号目录要能讲清楚
+  ctx.aiForm.season = 4;
+  check('季号 4 → 目录名 S04', ctx.aiSeasonDir() === 'S04', ctx.aiSeasonDir());
+  ctx.aiForm.season = 12;
+  check('季号 12 → 目录名 S12', ctx.aiSeasonDir() === 'S12', ctx.aiSeasonDir());
+  ctx.aiForm.season = '';
+  check('不填季号则无子目录', ctx.aiSeasonDir() === '', ctx.aiSeasonDir());
+  check('页面上解释了 S0X 的含义', html.includes('就是「第 {{ aiForm.season }} 季」的意思'));
+  check('文件夹行会说明「整包转存、不能单独改名」',
+    html.includes('row.dir_hint') && html.includes('{{ row.dir_hint }}'));
 
   // 入库后重新分析时，滚动目标应是日志而不是列表顶部
   ctx.aiScrollTarget = 'log';

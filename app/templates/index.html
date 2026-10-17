@@ -644,6 +644,15 @@
                 已用它的保存路径与命名规则作为默认值。
               </div>
 
+              <div v-if="aiResult && aiResult.filtered && (aiResult.filtered.irrelevant + aiResult.filtered.dead + aiResult.filtered.low_score) > 0"
+                   class="small text-muted mb-1">
+                <i class="bi bi-funnel mr-1"></i>已过滤
+                <b>{{ aiResult.filtered.irrelevant }}</b> 条无关、
+                <b>{{ aiResult.filtered.dead }}</b> 条失效链接
+                <span v-if="aiResult.filtered.low_score">、<b>{{ aiResult.filtered.low_score }}</b> 条低相关</span>
+                <span v-if="aiResult.from_cache" class="badge badge-light ml-1">来自缓存</span>
+              </div>
+
               <!-- 选定链接后收起候选列表：几十条候选会把分析结果顶到很下面 -->
               <div v-if="aiCandidatesCollapsed && aiSelectedCandidate"
                    class="alert alert-light py-2 small d-flex align-items-center mb-2">
@@ -704,6 +713,9 @@
                     {{ (aiResolved && (aiResolved.create_dirs || []).length) ? '将新建' : '已存在' }}
                   </span>
                   <code>{{ aiForm.savepath }}</code>
+                  <div v-if="aiSeasonDir()" class="text-muted mt-1" style="font-size:11px">
+                    子目录 <code>{{ aiSeasonDir() }}</code> 就是「第 {{ aiForm.season }} 季」的意思
+                  </div>
                 </div>
                 <button class="btn btn-sm btn-outline-secondary ml-2 flex-shrink-0 d-md-none" type="button"
                         @click="aiSettingsOpen = !aiSettingsOpen">
@@ -834,6 +846,9 @@
                 目标目录已有 {{ aiAnalysis.dir_file_count }} 个文件
               </div>
               <div v-if="aiAnalysis.dir_note" class="alert alert-warning py-2 small">{{ aiAnalysis.dir_note }}</div>
+              <div v-if="aiAnalysis.truncated" class="alert alert-warning py-2 small">
+                分享内容较多，只展开了前 300 个文件；没展开的文件夹会整包转存。
+              </div>
               <div v-if="!aiAnalysis.rule.valid" class="alert alert-danger py-2 small">
                 正则表达式无效，请检查「匹配正则」
               </div>
@@ -863,7 +878,10 @@
                            v-model="row.selected" :disabled="!aiSelectable(row)">
                     <div class="flex-fill" style="min-width:0">
                       <div class="small font-weight-bold">{{ row.status_text }}</div>
-                      <div class="small text-muted text-break">{{ row.file_name }}</div>
+                      <div class="small text-muted text-break">
+                        <span v-if="row.dir_path" class="badge badge-light mr-1">{{ row.dir_path }}</span>{{ row.file_name }}
+                      </div>
+                      <div v-if="row.dir_hint" class="small text-info text-break">{{ row.dir_hint }}</div>
                       <input type="text" class="form-control form-control-sm mt-1" v-model="row.new_name"
                              :disabled="row.dir"
                              :title="row.dir ? '文件夹整体转存，不重命名' : '可直接改成你想要的文件名'">
@@ -892,7 +910,11 @@
                       <input type="checkbox" v-model="row.selected" :disabled="!aiSelectable(row)">
                     </td>
                     <td><small>{{ row.status_text }}</small></td>
-                    <td><small :title="row.file_name">{{ row.file_name }}</small></td>
+                    <td>
+                      <span v-if="row.dir_path" class="badge badge-light mr-1">{{ row.dir_path }}</span>
+                      <small :title="row.file_name">{{ row.file_name }}</small>
+                      <div v-if="row.dir_hint" class="small text-info">{{ row.dir_hint }}</div>
+                    </td>
                     <td>
                       <input type="text" class="form-control form-control-sm" v-model="row.new_name"
                              :disabled="row.dir"
@@ -1413,6 +1435,11 @@
           if (sug.replace !== undefined) this.aiForm.replace = sug.replace;
           this.aiAnalyze();
         },
+        // 季号对应的子目录名（S04 = 第 4 季）
+        aiSeasonDir() {
+          const n = parseInt(this.aiForm.season, 10);
+          return n > 0 ? ('S' + String(n).padStart(2, '0')) : '';
+        },
         aiRulePlaceholder() {
           const preset = (this.formData.magic_regex || {})[this.aiForm.pattern];
           return preset ? preset.replace : '留空则沿用预设规则的替换模板';
@@ -1472,7 +1499,9 @@
             files: rows.map(row => ({
               fid: row.fid,
               file_name: row.file_name,
-              new_name: row.new_name
+              new_name: row.new_name,
+              // 文件在分享里的所在目录：后端按目录分批转存
+              parent_fid: row.parent_fid || ''
             }))
           })
             .then(response => {

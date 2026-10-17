@@ -10,6 +10,9 @@ class PanSou:
     PanSou 类，用于获取云盘资源
     """
 
+    # (连接超时, 读取超时)
+    TIMEOUT = (6, 20)
+
     def __init__(self, server):
         self.server = server
         self.session = requests.Session()
@@ -26,7 +29,8 @@ class PanSou:
         try:
             url = f"{self.server.rstrip('/')}/api/search"
             params = {"kw": keyword, "cloud_types": ["quark"], "res": "merge", "refresh": refresh}
-            response = self.session.get(url, params=params)
+            # 公共搜索服务不稳定，必须设超时，否则会一直挂到系统级超时（实测可达 2 分钟）
+            response = self.session.get(url, params=params, timeout=self.TIMEOUT)
             result = response.json()
             if result.get("code") == 0:
                 data = result.get("data", {}).get("merged_by_type", {}).get("quark", [])

@@ -278,6 +278,94 @@ def test_folder_match():
         check("类型兜底 %s → %r" % (text, want or "（空）"), ai.guess_category(text) == want)
 
 
+def test_search_filter():
+    print("【10】候选过滤：相关性 / 失效检测 / 缓存")
+    import run
+
+    check("标题含剧名 → 相关", run._name_is_relevant("背着善宰跑", [], "背着善宰跑 全16集 韩语中字"))
+    check("标题完全无关 → 过滤", not run._name_is_relevant("背着善宰跑", [], "甄嬛传 全76集 4K"))
+    check("别名也算相关", run._name_is_relevant("Lovely Runner", ["背着善宰跑"], "背着善宰跑 1080P"))
+    check("标点差异不影响判断",
+          run._name_is_relevant("奔跑吧·天路篇", [], "奔跑吧天路篇 2024 全12期"))
+    check("空标题判为不相关", not run._name_is_relevant("某某剧", [], ""))
+
+    class FakeAccount:
+        def __init__(self, status):
+            self.status = status
+
+        def extract_url(self, url):
+            return ("pwd_id", "", "", None)
+
+        def get_stoken(self, pwd_id, passcode):
+            return {"status": self.status}
+
+    check("get_stoken 200 → 链接有效", run._link_alive(FakeAccount(200), "u") is True)
+    check("get_stoken 410 → 链接失效", run._link_alive(FakeAccount(410), "u") is False)
+    check("get_stoken 500（网络异常）→ 判断不了，保留",
+          run._link_alive(FakeAccount(500), "u") is None)
+
+    class Broken:
+        def extract_url(self, url):
+            raise RuntimeError("boom")
+
+    check("解析异常 → 判断不了，保留", run._link_alive(Broken(), "u") is None)
+
+    run._SEARCH_CACHE.clear()
+    run._search_cache_put("k", [1, 2])
+    check("缓存写入后可命中", run._search_cache_get("k") == [1, 2])
+    check("未命中返回 None", run._search_cache_get("nope") is None)
+    run._SEARCH_CACHE["old"] = (0, [9])
+    check("过期缓存不再返回", run._search_cache_get("old") is None)
+
+
+def test_share_expand():
+    print("【11】分享里的文件夹展开成文件")
+    import run
+
+    class FakeAccount:
+        def __init__(self, tree):
+            self.tree = tree
+
+        def get_detail(self, pwd_id, stoken, fid):
+            return {"code": 0, "data": {"list": self.tree.get(fid, [])}}
+
+    tree = {
+        "": [
+            {"fid": "d1", "file_name": "S04", "dir": True},
+            {"fid": "f0", "file_name": "readme.txt", "dir": False},
+        ],
+        "d1": [
+            {"fid": "f1", "file_name": "E01.mkv", "dir": False},
+            {"fid": "f2", "file_name": "E02.mkv", "dir": False},
+        ],
+    }
+    items, truncated = run._expand_share_files(FakeAccount(tree), "pwd", "st", "")
+    check("文件夹被展开成文件", len(items) == 3, len(items))
+    check("子目录文件带目录前缀",
+          any(i["dir_path"] == "S04/" and i["file_name"] == "E01.mkv" for i in items), items)
+    check("根目录文件 dir_path 为空",
+          any(i["dir_path"] == "" and i["file_name"] == "readme.txt" for i in items))
+    check("记录文件所属目录 fid（转存要按目录分批）",
+          any(i["parent_fid"] == "d1" for i in items), [i["parent_fid"] for i in items])
+    check("没有超限则不标记截断", truncated is False)
+
+    deep = {
+        "": [{"fid": "d1", "file_name": "S1", "dir": True}],
+        "d1": [{"fid": "d2", "file_name": "S2", "dir": True}],
+        "d2": [{"fid": "d3", "file_name": "S3", "dir": True}],
+    }
+    items2, _ = run._expand_share_files(FakeAccount(deep), "p", "s", "", max_depth=1)
+    check("超过深度上限的文件夹原样保留（不静默丢内容）",
+          len(items2) == 1 and items2[0]["file_name"] == "S2" and items2[0]["dir"] is True,
+          items2)
+
+    many = {"": [{"fid": "f%d" % i, "file_name": "e%d.mkv" % i, "dir": False}
+                 for i in range(10)]}
+    items3, trunc3 = run._expand_share_files(FakeAccount(many), "p", "s", "", max_files=4)
+    check("达到数量上限时截断并标记", len(items3) == 4 and trunc3 is True,
+          (len(items3), trunc3))
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -300,6 +388,8 @@ def main():
     test_ai_paths(mr, presets, files)
     test_http_layer()
     test_folder_match()
+    test_search_filter()
+    test_share_expand()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0
