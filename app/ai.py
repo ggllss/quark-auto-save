@@ -570,9 +570,13 @@ def suggest_rename_rule(taskname, filenames, presets, apply_rule, client=None):
             "candidates": [],
         }
 
-    best = max(candidates, key=lambda c: c["score"])
+    # 撞名的规则不能推荐：多个文件算出同一个名字，转存时会互相覆盖。
+    # 综艺一期分上下集时，把「第N期上/下」丢掉就必然撞名。
+    safe = [c for c in candidates if not c.get("collision")]
+    pool = safe or candidates
+    best = max(pool, key=lambda c: c["score"])
 
-    # 让 AI 在候选里挑一个（并可微调模板）
+    # 让 AI 在（不撞名的）候选里挑一个（并可微调模板）
     if client is not None and client.ready and filenames:
         try:
             payload = {
@@ -581,7 +585,7 @@ def suggest_rename_rule(taskname, filenames, presets, apply_rule, client=None):
                 "candidates": [
                     {"index": i, "name": c["name"], "pattern": c["pattern"],
                      "replace": c["replace"], "sample_preview": c["preview"][:5]}
-                    for i, c in enumerate(candidates)
+                    for i, c in enumerate(pool)
                 ],
             }
             raw = client.chat_json(
@@ -589,9 +593,16 @@ def suggest_rename_rule(taskname, filenames, presets, apply_rule, client=None):
                 json.dumps(payload, ensure_ascii=False),
                 temperature=0,
             )
-            picked = _apply_rule_choice(raw, candidates, apply_rule, filenames, taskname)
+            picked = _apply_rule_choice(raw, pool, apply_rule, filenames, taskname)
             if picked:
-                return picked
+                # 模型可以微调模板，但微调后可能重新引入撞名（例如把「第N期上/下」
+                # 换掉），这里复验一次，撞名就退回评分最高的安全候选
+                chk = _score_rule(
+                    "ai", picked.get("pattern") or "", picked.get("replace") or "",
+                    apply_rule, filenames, taskname,
+                )
+                if not chk.get("collision"):
+                    return picked
         except Exception:  # noqa: BLE001 - 降级
             pass
 
@@ -658,8 +669,19 @@ def _score_rule(name, pattern, replace, apply_rule, filenames, taskname):
     total = max(1, len(filenames[:30]))
     score = 0.0
     if compiled_ok:
-        score += (normalized / total) * 70      # 规范成 SxxExx 的比例最重要
-        score += (changed / total) * 20         # 确实生效
+        # 撞名是硬伤：多个文件算出同一个名字，转存时会互相覆盖
+        unique_names = len({p["to"] for p in preview})
+        collision = len(preview) - unique_names
+        # 保留「第N期 / 上 / 下 / 加更」这类区分信息，综艺靠它区分同一期的上下集
+        kept_desc = sum(
+            1 for p in preview
+            if re.search(r"第\s*\d+\s*期|[上中下]|加更|花絮|先导|回顾|特辑", p["to"])
+        )
+        score += (normalized / total) * 40      # 规范成 SxxExx 的比例
+        score += (changed / total) * 15         # 确实生效
+        score += (kept_desc / total) * 25       # 保留了区分信息
+        score += (unique_names / total) * 30    # 不撞名
+        score -= collision * 30                 # 撞名重罚
         if "{TASKNAME}" in replace:
             score += 10                         # 带剧名的命名更利于刮削
     else:
@@ -671,7 +693,12 @@ def _score_rule(name, pattern, replace, apply_rule, filenames, taskname):
         "replace": replace,
         "preview": preview,
         "score": round(score, 2),
-        "reason": f"规范化 {normalized}/{total} 个文件",
+        "collision": collision if compiled_ok else 0,
+        "reason": (
+            f"规范化 {normalized}/{total} 个文件"
+            + (f"，但有 {collision} 处重名" if compiled_ok and collision else "")
+            + (f"，保留区分信息 {kept_desc}/{total}" if compiled_ok else "")
+        ),
     }
 
 

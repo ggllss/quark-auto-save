@@ -983,12 +983,68 @@ def _extract_se(name, mr):
     return season, episode
 
 
-def _episode_conflict(new_name, mr, dir_se):
+# 综艺/剧集的「内容信号」：这些才是判断「是不是同一集」的依据。
+# 只看 E 号会误判——综艺一期分上下集，E 往往只是文件序号。
+_CONTENT_TAGS = ("加更", "花絮", "先导", "回顾", "纯享", "预告", "特辑", "彩蛋", "番外", "会员版")
+
+
+def content_key(name):
+    """
+    从文件名里提取内容信号：日期、期号、上中下、类型标记。
+    返回 dict（可能为空 dict 表示提不出信号）。
+    """
+    text = name or ""
+    key = {}
+    m = re.search(r"(20\d{2})[.\-_]?(\d{2})[.\-_]?(\d{2})", text)
+    if m:
+        key["date"] = m.group(1) + m.group(2) + m.group(3)
+    m = re.search(r"第\s*(\d{1,4})\s*期", text)
+    if m:
+        key["period"] = int(m.group(1))
+    m = re.search(r"期\s*([上中下])", text) or re.search(r"([上中下])\s*(?:[.\-_ ]|$)", text)
+    if m:
+        key["part"] = m.group(1)
+    tags = sorted({t for t in _CONTENT_TAGS if t in text})
+    if tags:
+        key["tags"] = tuple(tags)
+    return key
+
+
+def _same_content(a, b):
+    """
+    两个文件是不是同一集。
+
+    期号、上下集、类型标记（加更/花絮/先导…）必须双方一致，缺省按空处理：
+    否则「第1期」会被判成和「第1期加更」同一集。
+    日期只在一方有日期时用于区分（库里的名字常常不带日期）。
+    """
+    if not a or not b:
+        return False
+    if a.get("period") != b.get("period"):
+        return False
+    if a.get("part") != b.get("part"):
+        return False
+    if tuple(a.get("tags", ())) != tuple(b.get("tags", ())):
+        return False
+    if "date" in a and "date" in b and a["date"] != b["date"]:
+        return False
+    return True
+
+
+def _episode_conflict(new_name, mr, dir_se, dir_content=()):
     """集号交叉比对：库里已有同一集（哪怕文件名不同）时返回冲突描述。
 
     这是「追更」场景的关键判定——仅比较完整文件名会漏掉
     「库里叫 E09.mp4、新算出来叫 剧名.S01E09.mp4」这类实际重复。
     """
+    # 先按内容信号判断（综艺一期分上下集时，E 号不可靠）
+    new_key = content_key(new_name)
+    if new_key:
+        for dir_name, dir_key in dir_content:
+            if _same_content(new_key, dir_key):
+                return dir_name
+
+    # 双方都没有期号/上下集等信息时，才退回按集号比对
     season, episode = _extract_se(new_name, mr)
     if episode is None:
         return None
@@ -1084,7 +1140,31 @@ def ai_analyze():
         except re.error:
             rule_ok = False
 
+    # {I}/{II} 这类序号变量需要先按文件名排序赋号，否则所有文件都会拿到同一个号
+    # （引擎在 do_save 里也是先 sort_file_list 再改名）
+    resolved_names = {}
+    if rule_ok and re.search(r"\{I+\}", rule_replace or ""):
+        pending = []
+        for f in share_list:
+            if f.get("dir"):
+                continue
+            fn = f.get("file_name") or ""
+            pending.append(
+                {
+                    "file_name_re": mr.sub(rule_pattern, rule_replace, fn),
+                    "updated_at": f.get("updated_at") or 0,
+                    "dir": False,
+                    "_orig": fn,
+                }
+            )
+        try:
+            mr.sort_file_list(pending)
+            resolved_names = {p["_orig"]: p["file_name_re"] for p in pending}
+        except Exception:
+            resolved_names = {}
+
     # 库里已有文件的季集索引，用于识别「同一集但文件名不同」的重复
+    dir_content = [(n, content_key(n)) for n in dir_names]
     dir_se = []
     for _name in dir_names:
         _s, _e = _extract_se(_name, mr)
@@ -1140,10 +1220,17 @@ def ai_analyze():
                 else True
             )
             exists_orig = bool(mr.is_exists(name, dir_names))
-            new_name = mr.sub(rule_pattern, rule_replace, name) if rule_ok else name
+            new_name = resolved_names.get(name) or (
+                mr.sub(rule_pattern, rule_replace, name) if rule_ok else name
+            )
             exists_new = bool(mr.is_exists(new_name, dir_names))
             row["new_name"] = new_name or name
             row["in_rule"] = in_rule
+            if rule_ok and re.search(
+                r"\{(TASKNAME|SXX|S|E|I+|EXT|PART|DATE|YEAR|CHINESE|VER)\}", new_name or ""
+            ):
+                row["unresolved"] = True
+                row.update({"status": "rule_error", "status_text": "命名变量未解析"})
             row["exists"] = exists_orig or exists_new
             if not rule_ok:
                 row.update({"status": "rule_error", "status_text": "规则无效"})
@@ -1156,7 +1243,7 @@ def ai_analyze():
             elif not in_rule:
                 row.update({"status": "unmatched", "status_text": "不匹配规则"})
             else:
-                conflict = _episode_conflict(row["new_name"], mr, dir_se)
+                conflict = _episode_conflict(row["new_name"], mr, dir_se, dir_content)
                 if conflict:
                     row.update(
                         {
@@ -1169,6 +1256,25 @@ def ai_analyze():
                     row.update({"status": "new", "status_text": "可新增"})
             row["default_selected"] = row["status"] == "new"
         rows.append(row)
+
+    # 命名撞车检测：多个文件算出同一个名字，转存时会互相覆盖，
+    # 这种情况通常说明所选规则把「第N期上/下」这类区分信息丢了
+    name_count = {}
+    for r in rows:
+        if r.get("dir"):
+            continue
+        nm = (r.get("new_name") or "").strip()
+        if nm:
+            name_count[nm] = name_count.get(nm, 0) + 1
+    for r in rows:
+        if r.get("dir"):
+            continue
+        nm = (r.get("new_name") or "").strip()
+        if nm and name_count.get(nm, 0) > 1:
+            r["collision"] = True
+            r["default_selected"] = False
+            if r.get("status") in ("new", "dup_episode", "unmatched"):
+                r["status_text"] = r["status_text"] + "（与其他文件重名）"
 
     # 排序：能直接入库的排前面，「不匹配规则」「已在库」这些放到后面
     # （稳定排序，同状态内保持分享里的原始顺序，也就是集数顺序）
@@ -1183,6 +1289,7 @@ def ai_analyze():
         "dup_episode": sum(1 for r in rows if r["status"] == "dup_episode"),
         "unmatched": sum(1 for r in rows if r["status"] == "unmatched"),
         "folder": sum(1 for r in rows if r["status"] == "folder"),
+        "collision": sum(1 for r in rows if r.get("collision")),
     }
 
     data = {
@@ -1206,7 +1313,9 @@ def ai_analyze():
     }
 
     # ④ 可选：推荐命名规则
-    if want_rule:
+    # 撞名时也自动推荐一次规则：默认规则（如 pattern 为空的 $TV_MAGIC）会把
+    # 「第N期上/下」这类区分信息丢掉，导致多个文件同名、内容比对失效
+    if want_rule or stats.get("collision"):
         try:
             filenames = [r["file_name"] for r in rows if not r["dir"]]
             data["rule_suggestion"] = ai.suggest_rename_rule(

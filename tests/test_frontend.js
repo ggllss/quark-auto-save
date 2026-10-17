@@ -563,6 +563,13 @@ async function testMobileInteraction() {
   check('删除后自动刷新分析', calls.some(c => c[1] === '/ai/analyze'));
 
   check('列表里有单条删除按钮', html.includes('aiDeleteRow(row)'));
+  check('默认进入 AI 追剧页', html.includes("activeTab: 'ai'"));
+  check('候选链接可点开（新窗口）',
+    html.includes('target="_blank"') && html.includes('cand.shareurl'));
+  check('收起后的切换条也显示链接',
+    html.includes('aiSelectedCandidate.shareurl'));
+  check('展示文件大小', html.includes('row.size | size'));
+  check('撞名时给出告警', html.includes('aiAnalysis.stats.collision'));
   check('支持批量删除已在库', html.includes('aiDeleteAllExists'));
 
   console.log('\n结果: ' + passed + ' 通过, ' + failed + ' 失败');

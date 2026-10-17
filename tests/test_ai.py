@@ -449,6 +449,45 @@ def test_notify_hook():
     check("每次入库前清空，不会串上次的消息", qas.NOTIFYS == [], qas.NOTIFYS)
 
 
+def test_content_key():
+    print("【14】综艺「一期分上下集」的同一集判定")
+    import run
+
+    check("第1期上 提取出期号与上下集",
+          run.content_key("现在就出发.E01.第1期上.mkv") == {"period": 1, "part": "上"},
+          run.content_key("现在就出发.E01.第1期上.mkv"))
+    check("日期型文件名提取出日期",
+          run.content_key("20261011.第1期下.mp4").get("date") == "20261011")
+    check("加更类提取出标记",
+          "加更" in run.content_key("20261012-第1期加更.mp4").get("tags", ()),
+          run.content_key("20261012-第1期加更.mp4"))
+    check("裸集号文件没有内容信号（退回集号比对）",
+          run.content_key("E09.mp4") == {}, run.content_key("E09.mp4"))
+
+    a = run.content_key("现在就出发.E01.第1期上.mkv")
+    b = run.content_key("现在就出发.E02.第1期下.mkv")
+    c = run.content_key("现在就出发.E03.第1期下.mkv")
+    check("第1期上 与 第1期下 不是同一集（这是之前误判的场景）",
+          not run._same_content(a, b))
+    check("两个「第1期下」是同一集（E 号不同也算）", run._same_content(b, c))
+    check("裸集号与有信号的文件无法判断时不误判", not run._same_content({}, b))
+
+    # 真实场景复核：库里 E01=第1期上 / E02=第1期下，分享里新增 第1期加更
+    lib = [("现在就出发.E01.第1期上.mkv", a), ("现在就出发.E02.第1期下.mkv", b)]
+    check("「第1期下」不会被判成库里已有的「第1期上」",
+          not run._same_content(c, a))
+    check("库里已有「第1期下」时能正确识别重复",
+          any(run._same_content(c, k) for _n, k in lib))
+
+    # 类型标记必须一致，否则「第1期」会和「第1期加更」被判成同一集
+    plain = run.content_key("现在就出发.E13.第1期.mp4")
+    extra = run.content_key("2026.10.13-第1期还有加更.mp4")
+    check("「第1期」与「第1期加更」不是同一集",
+          not run._same_content(plain, extra), (plain, extra))
+    check("「第1期上」与「第1期」（无上下集）不误判为同一集",
+          not run._same_content(a, plain), (a, plain))
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -475,6 +514,7 @@ def main():
     test_share_expand()
     test_season_autodetect()
     test_notify_hook()
+    test_content_key()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0

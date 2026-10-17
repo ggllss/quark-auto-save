@@ -667,6 +667,9 @@
                       · {{ Math.round(aiSelectedCandidate.score || 0) }} 分
                       · <a href="#" @click.prevent="aiCandidatesCollapsed = false">展开列表</a>
                     </div>
+                    <a v-if="aiSelectedCandidate.shareurl" :href="aiSelectedCandidate.shareurl"
+                       target="_blank" rel="noopener noreferrer"
+                       class="d-block text-truncate" style="font-size:11px">{{ aiSelectedCandidate.shareurl }}</a>
                   </div>
                   <button class="btn btn-sm btn-outline-primary flex-shrink-0" type="button"
                           :disabled="aiCandidateIndex >= (aiResult.candidates || []).length - 1"
@@ -700,6 +703,8 @@
                         {{ cand.source }}<span v-if="cand.channel"> / {{ cand.channel }}</span>
                         <span v-if="cand.datetime"> · {{ cand.datetime }}</span>
                       </small>
+                      <a v-if="cand.shareurl" :href="cand.shareurl" target="_blank" rel="noopener noreferrer"
+                         class="small d-block text-truncate" style="max-width:100%">{{ cand.shareurl }}</a>
                     </td>
                     <td class="d-none d-md-table-cell"><small>{{ cand.source }}<span v-if="cand.channel"> / {{ cand.channel }}</span></small></td>
                     <td class="d-none d-md-table-cell"><small>{{ cand.datetime }}</small></td>
@@ -869,6 +874,11 @@
                 目标目录已有 {{ aiAnalysis.dir_file_count }} 个文件
               </div>
               <div v-if="aiAnalysis.dir_note" class="alert alert-warning py-2 small">{{ aiAnalysis.dir_note }}</div>
+              <div v-if="aiAnalysis.stats.collision" class="alert alert-danger py-2 small">
+                有 <b>{{ aiAnalysis.stats.collision }}</b> 个文件算出了相同的目标文件名，转存会互相覆盖。
+                综艺一期分上下集时，请换一条能保留「第N期 / 上 / 下」的命名规则
+                （点「推荐命名规则」），或手动改这些行的名字。
+              </div>
               <div v-if="aiAnalysis.truncated" class="alert alert-warning py-2 small">
                 分享内容较多，只展开了前 300 个文件；没展开的文件夹会整包转存。
               </div>
@@ -910,6 +920,10 @@
                       <div class="small text-muted text-break">
                         <span v-if="row.dir_path" class="badge badge-light mr-1">{{ row.dir_path }}</span>{{ row.file_name }}
                       </div>
+                      <div class="small text-muted">
+                        {{ row.size ? (row.size | size) : '大小未知' }}
+                        <span v-if="row.updated_at"> · {{ row.updated_at | ts2date }}</span>
+                      </div>
                       <div v-if="row.dir_hint" class="small text-info text-break">{{ row.dir_hint }}</div>
                       <input type="text" class="form-control form-control-sm mt-1" v-model="row.new_name"
                              :disabled="row.dir"
@@ -946,6 +960,7 @@
                     <td>
                       <span v-if="row.dir_path" class="badge badge-light mr-1">{{ row.dir_path }}</span>
                       <small :title="row.file_name">{{ row.file_name }}</small>
+                      <small class="text-muted ml-1">{{ row.size ? (row.size | size) : '' }}</small>
                       <div v-if="row.dir_hint" class="small text-info">{{ row.dir_hint }}</div>
                     </td>
                     <td>
@@ -1232,7 +1247,7 @@
           isVerifying: false,
           searchTimer: null,
         },
-        activeTab: 'tasklist',
+        activeTab: 'ai',   // 默认进入「AI 追剧」
         configModified: false,
         // ===== AI 追剧 =====
         aiForm: {
