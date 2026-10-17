@@ -703,6 +703,22 @@ def _name_is_relevant(title, aliases, candidate_name):
     return any(k in name for k in keys)
 
 
+# 链接有效性缓存：短时间内不会变，避免每次搜索都重新探测（探测很贵）
+_ALIVE_CACHE = {}
+_ALIVE_TTL = 1800
+
+
+def _link_alive_cached(account, shareurl):
+    hit = _ALIVE_CACHE.get(shareurl)
+    if hit and time.time() - hit[0] < _ALIVE_TTL:
+        return hit[1]
+    value = _link_alive(account, shareurl)
+    if len(_ALIVE_CACHE) > 500:
+        _ALIVE_CACHE.clear()
+    _ALIVE_CACHE[shareurl] = (time.time(), value)
+    return value
+
+
 def _link_alive(account, shareurl):
     """
     检查分享链接是否仍然有效。
@@ -882,34 +898,77 @@ def ai_search():
     relevant = [c for c in pool if _name_is_relevant(title, aliases, c.get("taskname") or "")]
     dropped_irrelevant = len(pool) - len(relevant)
 
-    # ② 排序（AI 参与）
-    # 不再按模型评分做绝对阈值过滤：实测模型打分普遍偏低（29 条里 28 条低于 40 分），
-    # 按分数砍会把结果砍空；「是否相关」已由标题过滤保证，「是否有效」由存活检测保证。
-    ranked = ai.rank_links(intent, relevant[:60], client) if relevant else []
-    dropped_low_score = 0
+    # ② 排序：先用启发式（0 成本）粗排，再让 AI 精排。
+    # 不再按模型评分做绝对阈值过滤——实测模型打分普遍偏低，按分数砍会把结果砍空；
+    # 「是否相关」由标题过滤保证，「是否有效」由存活检测保证。
+    def _fresh_bonus(dt_text):
+        """新鲜度加分：搜索索引里躺着大量旧帖，旧帖的分享多已失效，
+        把新发布的顶上来能显著减少「点进去发现失效」。"""
+        try:
+            t = datetime.fromisoformat(str(dt_text).replace("Z", "+00:00"))
+            days = (datetime.now(timezone.utc) - t.astimezone(timezone.utc)).days
+        except Exception:  # noqa: BLE001
+            return 0
+        if days <= 3:
+            return 15
+        if days <= 7:
+            return 10
+        if days <= 30:
+            return 5
+        return 0
 
-    # ④ 存活检测：只查靠前的候选，已失效的链接不展示（用户说的「无效链接」）
+    dropped_low_score = 0
+    shortlist = []
+    if relevant:
+        heuristic = ai.rank_links(intent, relevant, None)
+        for _c in heuristic:
+            _c["fresh_bonus"] = _fresh_bonus(_c.get("datetime"))
+        heuristic.sort(key=lambda c: -((c.get("score") or 0) + c.get("fresh_bonus", 0)))
+        shortlist = heuristic[:24]
+
+    # ③ AI 精排与存活检测互不依赖，并行跑——串行会白等一倍时间
+    # （本地模型排序实测 7 秒，存活检测 5 秒左右）
+    ranked = shortlist
+    alive_flags = {}
     dropped_dead = 0
-    candidates = ranked[:20]
-    if candidates:
+    candidates = []
+    if shortlist:
         account = _require_cookie()
-        if account is not None:
+
+        def _check_alive():
+            if account is None:
+                return {}
             flags = {}
-            with ThreadPoolExecutor(max_workers=6) as ex:
-                futures = {ex.submit(_link_alive, account, c["shareurl"]): c for c in candidates}
+            with ThreadPoolExecutor(max_workers=10) as pool:
+                futures = {
+                    pool.submit(_link_alive_cached, account, c["shareurl"]): c
+                    for c in shortlist
+                }
                 for fut in as_completed(futures):
                     item = futures[fut]
                     try:
                         flags[item["shareurl"]] = fut.result()
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         flags[item["shareurl"]] = None
-            kept = []
-            for c in candidates:
-                if flags.get(c["shareurl"]) is False:
-                    dropped_dead += 1
-                else:
-                    kept.append(c)
-            candidates = kept
+            return flags
+
+        with ThreadPoolExecutor(max_workers=2) as outer:
+            fut_rank = outer.submit(ai.rank_links, intent, shortlist, client)
+            fut_alive = outer.submit(_check_alive)
+            try:
+                ranked = fut_rank.result() or shortlist
+            except Exception:  # noqa: BLE001 - AI 失败就退回粗排
+                ranked = shortlist
+            try:
+                alive_flags = fut_alive.result() or {}
+            except Exception:  # noqa: BLE001
+                alive_flags = {}
+
+        for c in ranked:
+            if alive_flags.get(c["shareurl"]) is False:
+                dropped_dead += 1
+            else:
+                candidates.append(c)
 
     task, reason = _match_task_by_title(intent.get("title") or "")
     baseline = None
