@@ -324,6 +324,18 @@ def test_search_filter():
     run._search_cache_maybe_put("full", [{"taskname": "x"}])
     check("有结果才写入缓存", run._search_cache_get("full") == [{"taskname": "x"}])
 
+    # 源可达性探测：连不上的源要能被识别出来（用 1 端口模拟服务未启动）
+    run.config_data = {"source": {
+        "pansou": {"enable": "true", "server": "http://127.0.0.1:1"},
+        "cloudsaver": {"enable": "false", "server": "http://127.0.0.1:2"},
+    }}
+    check("连不上的源会被识别出来", run._source_unreachable() == ["PanSou"],
+          run._source_unreachable())
+    run.config_data = {"source": {
+        "pansou": {"enable": "false", "server": "http://127.0.0.1:1"},
+    }}
+    check("未启用的源不参与探测", run._source_unreachable() == [], run._source_unreachable())
+
 
 def test_share_expand():
     print("【11】分享里的文件夹展开成文件")

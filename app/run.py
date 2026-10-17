@@ -688,6 +688,33 @@ def _link_alive(account, shareurl):
         return None
 
 
+def _source_unreachable():
+    """
+    粗略判断已启用的搜索源服务是否连得上（只做 TCP 连接，2 秒超时）。
+    返回连不上的源名称列表，用于把「源挂了」和「确实没资源」区分开。
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    src = config_data.get("source", {}) or {}
+    dead = []
+    for key, label in (("pansou", "PanSou"), ("cloudsaver", "CloudSaver")):
+        cfg = src.get(key) or {}
+        if str(cfg.get("enable", "true")).lower() != "true" or not cfg.get("server"):
+            continue
+        try:
+            parsed = urlparse(str(cfg["server"]))
+            host = parsed.hostname
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            if not host:
+                continue
+            conn = socket.create_connection((host, port), timeout=2)
+            conn.close()
+        except Exception:
+            dead.append(label)
+    return dead
+
+
 def _enabled_sources():
     """当前已启用的搜索源名称列表"""
     src = config_data.get("source", {}) or {}
@@ -764,14 +791,19 @@ def ai_search():
         pool, from_cache = cached, True
     else:
         from_cache = False
+        # 公共搜索源不稳定（实测 PanSou 成功率约 40%：有时 0.7 秒就返回空、
+        # 有时十几秒才超时）。空结果时多试几次：快速失败几乎不花时间，
+        # 慢的情况由总时长预算兜住，避免用户一次搜不到就以为没资源。
         t0 = time.time()
-        pool = gather()
-        elapsed = time.time() - t0
-        # 公共搜索源偶发限流/超时会返回空列表，空结果时补一次。
-        # 但如果第一轮本身就很慢（说明源在硬扛而不是被限流），再等一轮只会更久，直接放弃。
-        if not pool and queries and elapsed < 10:
-            retried = True
+        pool, attempts = [], 0
+        while True:
+            attempts += 1
             pool = gather()
+            if pool:
+                break
+            if attempts >= 3 or (time.time() - t0) >= 40:
+                break
+        retried = attempts > 1
         _search_cache_maybe_put(cache_key, pool)
 
     # ① 相关性过滤：标题里完全不含剧名/别名的，直接挡掉
@@ -833,10 +865,17 @@ def ai_search():
         if not sources:
             hint = "未启用任何搜索源，请到「系统配置 → 搜索源」中配置 PanSou 或 CloudSaver。"
         else:
-            hint = (
-                "搜索源（%s）没有返回结果：可能是被限流或超时，也可能确实没有资源。"
-                "建议稍后重试，或换个更宽泛的关键词。" % "、".join(sources)
-            )
+            dead = _source_unreachable()
+            if dead:
+                hint = (
+                    "搜索源（%s）连不上：请检查对应服务是否在运行（配置见「系统配置 → 搜索源」）。"
+                    % "、".join(dead)
+                )
+            else:
+                hint = (
+                    "搜索源（%s）试了 %d 次都没有返回结果：公共搜索源此刻可能不稳定或被限流。"
+                    "等几秒再点一次搜索通常就有结果。" % ("、".join(sources), attempts)
+                )
     elif not candidates:
         hint = (
             "搜到 %d 条，但都不是这部剧的资源（已按剧名过滤，并剔除了失效链接）。"
@@ -852,6 +891,7 @@ def ai_search():
                 "ai_used": intent.get("source") == "ai",
                 "sources": sources,
                 "retried": retried,
+                "attempts": 0 if from_cache else attempts,
                 "from_cache": from_cache,
                 "pool_size": len(pool),
                 "filtered": {

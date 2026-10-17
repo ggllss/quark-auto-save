@@ -11,7 +11,7 @@ class PanSou:
     """
 
     # (连接超时, 读取超时)
-    TIMEOUT = (6, 20)
+    TIMEOUT = (6, 18)
 
     def __init__(self, server):
         self.server = server
