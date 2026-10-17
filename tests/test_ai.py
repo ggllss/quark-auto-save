@@ -527,6 +527,47 @@ def test_extra_routing():
           run._extra_label("花絮/特辑.mp4"))
 
 
+def test_tmdb_specials():
+    print("【16】花絮按 TMDB 特辑季（Season 0）集号编号")
+    import tmdb
+
+    # 取自「现在就出发」TMDB Season 0 的真实数据
+    eps = [
+        {"number": 131, "name": "第4季 先导片上", "air_date": "2026-10-01"},
+        {"number": 132, "name": "第4季 先导片下", "air_date": "2026-10-01"},
+        {"number": 133, "name": "第4季 先导片·沙滩小黑脚纯享", "air_date": "2026-10-01"},
+        {"number": 138, "name": "第4季 第1期加更", "air_date": "2026-10-12"},
+        {"number": 139, "name": "第4季 第1期还有加更", "air_date": "2026-10-13"},
+        {"number": 140, "name": "第4季 第1期花絮特辑", "air_date": "2026-10-15"},
+        {"number": 45, "name": "第3季 第5期加更", "air_date": "2025-11-04"},
+    ]
+
+    check("日期 20261012", tmdb.name_date("20261012-第1期加更.mp4") == "2026-10-12",
+          tmdb.name_date("20261012-第1期加更.mp4"))
+    check("日期 2026.10.1（单位数）", tmdb.name_date("2026.10.1-先导片下.mp4") == "2026-10-01",
+          tmdb.name_date("2026.10.1-先导片下.mp4"))
+    check("无日期返回空", tmdb.name_date("先导片上.mp4") == "", tmdb.name_date("先导片上.mp4"))
+
+    def num(fn):
+        hit = tmdb.match_special(eps, fn, season=4)
+        return hit.get("number") if hit else None
+
+    check("第1期加更 → S00E138（用户说的 138）", num("20261012-第1期加更.mp4") == 138,
+          num("20261012-第1期加更.mp4"))
+    check("第1期还有加更 → S00E139", num("2026.10.13-第1期还有加更.mp4") == 139,
+          num("2026.10.13-第1期还有加更.mp4"))
+    check("第1期花絮特辑 → S00E140", num("20261015-第1期花絮特辑.mp4") == 140,
+          num("20261015-第1期花絮特辑.mp4"))
+    check("先导片下 → S00E132（不是纯享那条）", num("2026.10.1-先导片下.mp4") == 132,
+          num("2026.10.1-先导片下.mp4"))
+    check("先导片纯享 → S00E133", num("2026.10.1-先导片纯享.mp4") == 133,
+          num("2026.10.1-先导片纯享.mp4"))
+    check("无日期的先导片上 → S00E131（靠季号+上下集收敛）",
+          num("先导片上.mp4") == 131, num("先导片上.mp4"))
+    check("TMDB 当天没有的（回顾特辑）不硬套集号", num("20260927.回顾特辑.mp4") is None,
+          num("20260927.回顾特辑.mp4"))
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -555,6 +596,7 @@ def main():
     test_notify_hook()
     test_content_key()
     test_extra_routing()
+    test_tmdb_specials()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0

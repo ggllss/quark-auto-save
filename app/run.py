@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from sdk.cloudsaver import CloudSaver
 from sdk.pansou import PanSou
 import ai
+import tmdb
 from datetime import timedelta
 import subprocess
 import requests
@@ -1251,11 +1252,36 @@ def ai_analyze():
         _m = re.search(r"S00E(\d{1,3})", _n, re.I)
         if _m:
             _seq = max(_seq, int(_m.group(1)))
+    # 花絮的集号按 TMDB 特辑季（Season 0）匹配：先按文件名里的日期找候选，
+    # 再用期号/上下集/类型词打分。这是唯一能让 Emby/Jellyfin 正确刮削的编号。
+    tmdb_key = (
+        (config_data.get("tmdb") or {}).get("api_key")
+        or os.environ.get("TMDB_API_KEY")
+        or ""
+    )
+    tmdb_map = {}
+    if tmdb_key and _extras:
+        try:
+            _tail = savepath_norm.rsplit("/", 1)[-1] or ""
+            _season = int(_tail[1:]) if re.fullmatch(r"[Ss]\d{1,2}", _tail) else None
+            tmdb_map = tmdb.specials_for_show(
+                tmdb_key,
+                taskname,
+                [f.get("file_name") or "" for f in _extras],
+                season=_season,
+            )
+        except Exception:  # noqa: BLE001 - 查不到就退回期号
+            tmdb_map = {}
+
     for _i, _f in enumerate(_extras, _seq + 1):
         _fn = _f.get("file_name") or ""
         _stem, _ext = os.path.splitext(_fn)
         _label = _extra_label(_fn, taskname)
-        _num = extra_episode_number(_fn, episode_base, _i)
+        _hit = tmdb_map.get(_fn) or {}
+        if _hit.get("number"):
+            _num = int(_hit["number"])          # TMDB 特辑季的真实集号
+        else:
+            _num = extra_episode_number(_fn, episode_base, _i)
         extra_new[_f.get("fid")] = (
             f"{taskname}.S00E{_num:02d}.{_label}{_ext}"
             if _label
@@ -1336,6 +1362,12 @@ def ai_analyze():
                 cmp_content = dir_content
                 cmp_se = dir_se
             row["is_extra"] = is_extra
+            if is_extra:
+                _hit = tmdb_map.get(name) or {}
+                if _hit.get("number"):
+                    row["tmdb_episode"] = _hit.get("number")
+                    row["tmdb_match"] = _hit.get("by") or ""
+                    row["tmdb_name"] = _hit.get("name") or ""
             row["target_savepath"] = extra_dir if is_extra else savepath_norm
             row["target_dir"] = "S00" if is_extra else ""
             if is_extra:
@@ -1431,6 +1463,8 @@ def ai_analyze():
         "episode_base": episode_base,
         "extra_exists": extra_exists,
         "extra_note": extra_note,
+        "tmdb_matched": len(tmdb_map),
+        "tmdb_enabled": bool(tmdb_key),
         "dir_file_count": len(dir_names),
         "dir_files": dir_names[:100],
         # 分享里的文件夹已递归展开成文件；被截断时提示一下
