@@ -1628,7 +1628,9 @@
               const res = response.data;
               if (!res.success) { this.aiError = res.message || '入库失败'; return; }
               this.aiCommitLog = res.data.log || '(无输出)';
-              this.showToast(res.data.ok ? '入库完成' : '入库结束，请看日志', res.data.ok ? 'success' : 'warning');
+              const notifyTip = res.data.notified ? '，已推送通知' : '';
+              this.showToast((res.data.ok ? '入库完成' : '入库结束，请看日志') + notifyTip,
+                res.data.ok ? 'success' : 'warning');
               // 重新分析以刷新「已在库」状态；结果出来后滚到日志而不是列表顶部
               this.aiScrollTarget = 'log';
               this.aiAnalyze();

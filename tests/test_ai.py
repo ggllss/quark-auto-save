@@ -435,6 +435,20 @@ def test_season_autodetect():
         run._list_dir_items = orig
 
 
+def test_notify_hook():
+    print("【13】入库通知复用已有渠道")
+    import quark_auto_save as qas
+
+    check("发送入口存在（复用引擎的 send_ql_notify）",
+          callable(getattr(qas, "send_ql_notify", None)))
+    qas.NOTIFYS.clear()
+    qas.add_notify("✅《测试剧》添加追更")
+    check("add_notify 累积到 NOTIFYS", len(qas.NOTIFYS) == 1, qas.NOTIFYS)
+    check("通知内容完整", "测试剧" in qas.NOTIFYS[0], qas.NOTIFYS[0])
+    qas.NOTIFYS.clear()
+    check("每次入库前清空，不会串上次的消息", qas.NOTIFYS == [], qas.NOTIFYS)
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -460,6 +474,7 @@ def main():
     test_search_filter()
     test_share_expand()
     test_season_autodetect()
+    test_notify_hook()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0

@@ -1323,6 +1323,12 @@ def ai_commit():
     import contextlib
     import io
 
+    # 复用引擎的通知机制：do_save_task 内部会 add_notify 累积消息，
+    # 这里清空后统一读取，再走项目已有的推送渠道
+    import quark_auto_save as qas
+
+    qas.NOTIFYS.clear()
+
     buf = io.StringIO()
     ok_all = True
     renamed = 0
@@ -1393,11 +1399,31 @@ def ai_commit():
         except Exception as e:
             buf.write("\n插件加载异常：%s\n" % e)
 
+    # 入库后推送通知：复用项目已有的渠道（notify 模块 + 配置里的 push_config）
+    notified = False
+    if qas.NOTIFYS:
+        body = "（AI 追剧手动入库）\n" + "\n".join(qas.NOTIFYS)
+        try:
+            # send_ql_notify 从模块级 CONFIG_DATA 读 push_config，
+            # Web 进程里它一直是空的，这里临时指向 Web 的配置
+            prev_cfg = getattr(qas, "CONFIG_DATA", None)
+            qas.CONFIG_DATA = config_data
+            try:
+                with contextlib.redirect_stdout(buf):
+                    qas.send_ql_notify("【夸克自动转存】", body)
+                notified = True
+                buf.write("\n📮 已通过已配置的通知渠道推送\n")
+            finally:
+                qas.CONFIG_DATA = prev_cfg
+        except Exception as e:
+            buf.write("\n通知推送异常：%s\n" % e)
+
     return jsonify(
         {
             "success": True,
             "data": {
                 "ok": ok_all,
+                "notified": notified,
                 "renamed": renamed,
                 "batches": len(groups),
                 "log": buf.getvalue().strip()[-6000:],
