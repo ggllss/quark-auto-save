@@ -698,62 +698,54 @@
                   </button>
                 </div>
               </div>
-              <div v-else class="table-responsive">
-              <table class="table table-sm table-hover">
-                <thead>
-                  <tr>
-                    <th style="width:56px">匹配度</th>
-                    <th>资源名称</th>
-                    <th class="d-none d-md-table-cell" style="width:120px">来源</th>
-                    <th class="d-none d-md-table-cell" style="width:150px">更新时间</th>
-                    <th style="width:96px">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(cand, ci) in aiResult.candidates" :key="ci">
-                    <td>
-                      <span class="badge" :class="cand.score >= 80 ? 'badge-success' : (cand.score >= 50 ? 'badge-warning' : 'badge-secondary')">
-                        {{ Math.round(cand.score) }}
-                      </span>
-                    </td>
-                    <td>
-                      <div class="text-break">{{ cand.taskname }}</div>
-                      <small class="text-muted">{{ cand.reason }}</small>
-                      <small class="text-muted d-block d-md-none">
-                        {{ cand.source }}<span v-if="cand.channel"> / {{ cand.channel }}</span>
-                        <span v-if="cand.datetime"> · {{ cand.datetime }}</span>
-                      </small>
-                      <a v-if="cand.shareurl" :href="cand.shareurl" target="_blank" rel="noopener noreferrer"
-                         class="small d-block text-truncate" style="max-width:100%">{{ cand.shareurl }}</a>
-                      <!-- 标题看不出分享更新到哪一集，点一下直接列最新的文件 -->
-                      <div v-if="cand.shareurl" class="small">
-                        <span v-if="cand.latest_file" class="text-success mr-1" style="word-break:break-all">
-                          最新：{{ cand.latest_file }}
-                          <span class="text-muted">（共 {{ cand.latest_total }} 个）</span>
-                        </span>
-                        <a v-else href="#" @click.prevent="aiCheckLatest(cand)">看最新</a>
-                        <span v-if="aiLatest[cand.shareurl] && aiLatest[cand.shareurl].loading"
-                              class="text-muted ml-1">读取中…</span>
-                        <span v-else-if="aiLatest[cand.shareurl] && aiLatest[cand.shareurl].error"
-                              class="text-danger ml-1">{{ aiLatest[cand.shareurl].error }}</span>
-                        <span v-else-if="aiLatest[cand.shareurl] && (aiLatest[cand.shareurl].items || []).length"
-                              class="text-success ml-1" style="word-break:break-all"
-                              :title="(aiLatest[cand.shareurl].items || []).map(i => i.file_name).join('\n')">
-                          最新：{{ aiLatest[cand.shareurl].items[0].file_name }}
-                          <span class="text-muted">（共 {{ aiLatest[cand.shareurl].total }} 个文件）</span>
+              <!-- 候选列表用卡片：手机上表格会横向溢出，「匹配度」竖排换行、「操作」列被切掉 -->
+              <!-- ai-has-actionbar：给底部固定的入库条留出空间，避免最后一条被遮住 -->
+              <div v-else class="ai-has-actionbar">
+                <div v-for="(cand, ci) in aiResult.candidates" :key="ci"
+                     class="ai-cand card mb-2">
+                  <div class="card-body p-2">
+                    <div class="d-flex">
+                      <div class="mr-2 text-center" style="flex:0 0 46px">
+                        <span class="badge d-block py-2"
+                              :class="cand.score >= 80 ? 'badge-success' : (cand.score >= 50 ? 'badge-warning' : 'badge-secondary')">
+                          {{ Math.round(cand.score) }}
                         </span>
                       </div>
-                    </td>
-                    <td class="d-none d-md-table-cell"><small>{{ cand.source }}<span v-if="cand.channel"> / {{ cand.channel }}</span></small></td>
-                    <td class="d-none d-md-table-cell"><small>{{ cand.datetime }}</small></td>
-                    <td>
-                      <button class="btn btn-sm btn-outline-primary" type="button" @click="aiSelectLink(cand)">
-                        分析
-                      </button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+                      <div style="flex:1 1 auto; min-width:0">
+                        <div class="text-break font-weight-bold" style="line-height:1.35">{{ cand.taskname }}</div>
+                        <small v-if="cand.reason" class="text-muted d-block mt-1">{{ cand.reason }}</small>
+                        <small class="text-muted d-block mt-1 text-break">
+                          {{ cand.source }}<span v-if="cand.channel"> / {{ cand.channel }}</span>
+                          <span v-if="cand.datetime"> · {{ cand.datetime }}</span>
+                        </small>
+                        <a v-if="cand.shareurl" :href="cand.shareurl" target="_blank" rel="noopener noreferrer"
+                           class="small d-block text-break">{{ cand.shareurl }}</a>
+                        <!-- 标题看不出分享更新到哪一集，直接显示它里面最新的文件 -->
+                        <div v-if="cand.shareurl" class="small mt-1">
+                          <span v-if="cand.latest_file" class="text-success" style="word-break:break-all">
+                            <i class="bi bi-clock-history mr-1"></i>最新：{{ cand.latest_file }}
+                            <span class="text-muted">（共 {{ cand.latest_total }} 个文件）</span>
+                          </span>
+                          <a v-else href="#" @click.prevent="aiCheckLatest(cand)">看最新</a>
+                          <span v-if="aiLatest[cand.shareurl] && aiLatest[cand.shareurl].loading"
+                                class="text-muted ml-1">读取中…</span>
+                          <span v-else-if="aiLatest[cand.shareurl] && aiLatest[cand.shareurl].error"
+                                class="text-danger ml-1">{{ aiLatest[cand.shareurl].error }}</span>
+                          <span v-else-if="aiLatest[cand.shareurl] && (aiLatest[cand.shareurl].items || []).length"
+                                class="text-success ml-1" style="word-break:break-all"
+                                :title="(aiLatest[cand.shareurl].items || []).map(i => i.file_name).join('\n')">
+                            最新：{{ aiLatest[cand.shareurl].items[0].file_name }}
+                            <span class="text-muted">（共 {{ aiLatest[cand.shareurl].total }} 个文件）</span>
+                          </span>
+                        </div>
+                        <button class="btn btn-sm btn-primary btn-block mt-2" type="button"
+                                @click="aiSelectLink(cand)">
+                          <i class="bi bi-magic mr-1"></i>分析这个分享
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 

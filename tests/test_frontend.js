@@ -366,10 +366,12 @@ async function testPathResolution() {
 function testMobileMarkup() {
   console.log('【8】手机端适配');
   const trCount = (html.match(/table-responsive/g) || []).length;
-  check('所有表格都支持横向滚动', trCount >= 3, trCount);
+  check('所有表格都支持横向滚动', trCount >= 2, trCount);
   check('分析结果有手机端卡片视图', /d-md-none[\s\S]{0,900}aiAnalysis\.rows/.test(html));
   check('分析表格仅在中屏以上显示', html.includes('d-none d-md-block table-responsive'));
-  check('候选表次要列在小屏隐藏', html.includes('d-none d-md-table-cell'));
+  // 候选列表改成卡片后不再用表格，手机上不会横向溢出
+  check('候选列表不是表格（手机不溢出）',
+    !/table[\s\S]{0,300}aiResult\.candidates/.test(html));
   check('操作按钮区支持换行', html.includes('d-flex flex-wrap align-items-center'));
   check('手机端有独立的全选控件', html.includes('aiSelectAllMobile'));
   check('类型/季号输入在手机上不被挤压',
@@ -593,6 +595,12 @@ async function testMobileInteraction() {
   check('手工链接会用剧名补齐 taskname', ctx.aiForm.taskname === '现在就出发', ctx.aiForm.taskname);
   check('手工链接会清掉候选列表（没有搜索态）', ctx.aiResult === null, ctx.aiResult);
   await tick();
+
+  // 手机端：候选列表必须是卡片，不能是表格（窄屏表格会溢出、操作列被切掉）
+  check('候选列表用卡片而不是表格', html.includes('ai-cand') && !/table[\s\S]{0,200}aiResult\.candidates/.test(html));
+  check('候选卡片有「分析这个分享」按钮', html.includes('分析这个分享'));
+  check('候选卡片显示分享里最新的文件', html.includes('最新：{{ cand.latest_file }}'));
+  check('候选列表给底部操作条留白', /class="ai-has-actionbar"/.test(html));
 
   check('列表里有单条删除按钮', html.includes('aiDeleteRow(row)'));
   check('默认进入 AI 追剧页', html.includes("activeTab: 'ai'"));
