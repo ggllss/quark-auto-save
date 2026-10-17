@@ -526,6 +526,45 @@ async function testMobileInteraction() {
   await testPathResolution();
   testMobileMarkup();
   await testMobileInteraction();
+  // 切换链接后结果要同步更新：失败时绝不能留着上一个链接的结果
+  ctx.aiAnalysis = {
+    rows: [{ status: 'new', file_name: 'old.mp4', new_name: 'x', selected: true }],
+    stats: {}, rule: { valid: true }
+  };
+  global.__nextResponse = { data: { success: false, message: '分享地址已失效' } };
+  ctx.aiForm.shareurl = 'https://pan.quark.cn/s/dead';
+  ctx.aiAnalyze();
+  await tick();
+  check('分析失败时清空上一次的结果（不再显示旧链接的文件）',
+    ctx.aiAnalysis === null, ctx.aiAnalysis);
+  check('失败原因显示出来', /失效/.test(ctx.aiError || ''), ctx.aiError);
+  check('分析请求序号递增（用于丢弃过期响应）', ctx.aiAnalyzeSeq > 0, ctx.aiAnalyzeSeq);
+
+  // 删除已在库的文件
+  ctx.aiAnalysis = {
+    rows: [
+      { status: 'exists', lib_name: 'E01.mp4', file_name: 'E01.mkv', selected: false },
+      { status: 'new', lib_name: '', file_name: 'E02.mkv', selected: true }
+    ],
+    stats: {}, rule: { valid: true }
+  };
+  ctx.aiForm.savepath = '/0-影音/电视剧/X';
+  check('统计出已在库的数量', ctx.aiExistsCount() === 1, ctx.aiExistsCount());
+  calls.length = 0;
+  global.__nextResponse = {
+    data: { success: true, data: { ok: true, deleted: ['E01.mp4'], missing: [] } }
+  };
+  ctx.aiDeleteRow(ctx.aiAnalysis.rows[0]);
+  await tick();
+  const del = calls.find(c => c[1] === '/ai/delete');
+  check('删除按钮调用 /ai/delete', !!del);
+  check('按库里的文件名删除（不是分享里的名字）',
+    !!del && del[2].file_names[0] === 'E01.mp4', del && del[2]);
+  check('删除后自动刷新分析', calls.some(c => c[1] === '/ai/analyze'));
+
+  check('列表里有单条删除按钮', html.includes('aiDeleteRow(row)'));
+  check('支持批量删除已在库', html.includes('aiDeleteAllExists'));
+
   console.log('\n结果: ' + passed + ' 通过, ' + failed + ' 失败');
   process.exit(failed ? 1 : 0);
 })();

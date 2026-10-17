@@ -1083,6 +1083,7 @@ def ai_analyze():
                     "dir_hint": dir_hint,
                     "in_rule": True,
                     "exists": exists,
+                    "lib_name": name if exists else "",
                     "default_selected": not exists,
                 }
             )
@@ -1101,9 +1102,11 @@ def ai_analyze():
             if not rule_ok:
                 row.update({"status": "rule_error", "status_text": "规则无效"})
             elif exists_orig:
-                row.update({"status": "exists", "status_text": "已在库（同名）"})
+                row.update({"status": "exists", "status_text": "已在库（同名）",
+                            "lib_name": name})
             elif exists_new:
-                row.update({"status": "exists", "status_text": "已在库（改名后同名）"})
+                row.update({"status": "exists", "status_text": "已在库（改名后同名）",
+                            "lib_name": new_name})
             elif not in_rule:
                 row.update({"status": "unmatched", "status_text": "不匹配规则"})
             else:
@@ -1173,6 +1176,57 @@ def ai_analyze():
     return jsonify({"success": True, "data": data})
 
 
+@app.route("/ai/delete", methods=["POST"])
+def ai_delete():
+    """
+    删除目标目录里已存在的文件（想重新导入更好的版本时用）。
+    走回收站（引擎的 delete 用 action_type=2），删错了可以在网盘回收站恢复。
+    """
+    if not is_login():
+        return jsonify({"success": False, "message": "未登录"})
+    body = request.json or {}
+    savepath = (body.get("savepath") or "/").strip() or "/"
+    names = [str(n).strip() for n in (body.get("file_names") or []) if str(n).strip()]
+    if not names:
+        return jsonify({"success": False, "message": "没有指定要删除的文件"})
+    account = _require_cookie()
+    if account is None:
+        return jsonify({"success": False, "message": "请先在系统配置里填写 Cookie"})
+
+    savepath_norm = re.sub(r"/{2,}", "/", f"/{savepath}")
+    try:
+        fids = account.get_fids([savepath_norm])
+        if not fids:
+            return jsonify({"success": False, "message": f"目录不存在：{savepath_norm}"})
+        items = account.ls_dir(fids[0]["fid"]).get("data", {}).get("list") or []
+    except Exception as e:
+        return jsonify({"success": False, "message": f"读取目录失败：{e}"})
+
+    want = set(names)
+    targets = [it for it in items if (it.get("file_name") or "") in want]
+    found = {it.get("file_name") for it in targets}
+    if not targets:
+        return jsonify({"success": False, "message": "目录里没有找到要删除的文件（可能已被删或已改名）"})
+
+    try:
+        ret = account.delete([it["fid"] for it in targets])
+        ok = ret.get("code") == 0
+    except Exception as e:
+        return jsonify({"success": False, "message": f"删除失败：{e}"})
+
+    return jsonify(
+        {
+            "success": True,
+            "data": {
+                "ok": ok,
+                "deleted": sorted(found),
+                "missing": sorted(want - found),
+                "message": ret.get("message") or "",
+            },
+        }
+    )
+
+
 @app.route("/ai/commit", methods=["POST"])
 def ai_commit():
     """
@@ -1226,6 +1280,7 @@ def ai_commit():
     buf = io.StringIO()
     ok_all = True
     renamed = 0
+    last_tree = None
     for parent_fid, group in groups.items():
         rename_map = {}
         for f in group:
@@ -1255,9 +1310,42 @@ def ai_commit():
             with contextlib.redirect_stdout(buf):
                 tree = account.do_save_task(task)
             ok_all = ok_all and bool(tree)
+            if tree:
+                last_tree = tree
         except Exception as e:
             buf.write("转存异常：%s\n%s\n" % (e, traceback.format_exc()))
             ok_all = False
+
+    # 入库成功后触发插件：与定时任务的 do_save 保持一致
+    # （SmartStrm 生成 .strm、alist/emby 刷新等都在插件里）
+    if ok_all:
+        try:
+            plugins, _pc, task_plugins_cfg = Config.load_plugins(
+                dict(config_data.get("plugins") or {})
+            )
+            plugin_task = {
+                "taskname": taskname,
+                "savepath": savepath_norm,
+                "shareurl": shareurl,
+                "pattern": ".*",
+                "replace": "",
+                "addition": task_plugins_cfg,
+            }
+            triggered = []
+            for plugin_name, plugin in plugins.items():
+                if getattr(plugin, "is_active", False) and hasattr(plugin, "run"):
+                    triggered.append(plugin_name)
+                    try:
+                        with contextlib.redirect_stdout(buf):
+                            plugin.run(plugin_task, account=account, tree=last_tree)
+                    except Exception as e:
+                        buf.write("  插件 %s 出错：%s\n" % (plugin_name, e))
+            if triggered:
+                buf.write("\n🧩 已触发插件：%s\n" % "、".join(triggered))
+            else:
+                buf.write("\n（没有启用中的插件需要触发）\n")
+        except Exception as e:
+            buf.write("\n插件加载异常：%s\n" % e)
 
     return jsonify(
         {

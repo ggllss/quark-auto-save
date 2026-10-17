@@ -856,6 +856,10 @@
                         :class="aiFilter === 'exists' ? 'btn-primary' : 'btn-outline-secondary'"
                         @click="aiFilter = 'exists'">已在库 {{ aiFilterCount('exists') }}</button>
                 <span class="flex-fill"></span>
+                <button v-if="aiExistsCount()" class="btn btn-sm btn-outline-danger d-md-none flex-shrink-0 mr-1"
+                        type="button" :disabled="aiDeleting" @click="aiDeleteAllExists()">
+                  删除已在库 {{ aiExistsCount() }}
+                </button>
                 <button class="btn btn-sm btn-outline-success d-md-none flex-shrink-0" type="button"
                         @click="aiSelectOnlyNew()">只选可新增</button>
               </div>
@@ -896,7 +900,13 @@
                     <input type="checkbox" class="mr-2 mt-1 ai-row-check" style="flex:0 0 auto"
                            v-model="row.selected">
                     <div class="flex-fill" style="min-width:0">
-                      <div class="small font-weight-bold">{{ row.status_text }}</div>
+                      <div class="d-flex align-items-center">
+                        <div class="small font-weight-bold flex-fill">{{ row.status_text }}</div>
+                        <button v-if="row.lib_name" class="btn btn-sm btn-link text-danger py-0 px-1 flex-shrink-0"
+                                type="button" :disabled="aiDeleting" @click="aiDeleteRow(row)">
+                          <i class="bi bi-trash"></i> 删除
+                        </button>
+                      </div>
                       <div class="small text-muted text-break">
                         <span v-if="row.dir_path" class="badge badge-light mr-1">{{ row.dir_path }}</span>{{ row.file_name }}
                       </div>
@@ -928,7 +938,11 @@
                     <td>
                       <input type="checkbox" v-model="row.selected">
                     </td>
-                    <td><small>{{ row.status_text }}</small></td>
+                    <td>
+                      <small>{{ row.status_text }}</small>
+                      <button v-if="row.lib_name" class="btn btn-sm btn-link text-danger py-0 px-1 d-block"
+                              type="button" :disabled="aiDeleting" @click="aiDeleteRow(row)">删除</button>
+                    </td>
                     <td>
                       <span v-if="row.dir_path" class="badge badge-light mr-1">{{ row.dir_path }}</span>
                       <small :title="row.file_name">{{ row.file_name }}</small>
@@ -952,6 +966,10 @@
                   <i v-else class="bi bi-box-arrow-in-down mr-1"></i>确认入库
                 </button>
                 <button class="btn btn-outline-secondary mr-2 mb-1" type="button" @click="aiReset()">清空重来</button>
+                <button v-if="aiExistsCount()" class="btn btn-outline-danger mr-2 mb-1 d-none d-md-inline-block"
+                        type="button" :disabled="aiDeleting" @click="aiDeleteAllExists()">
+                  <i class="bi bi-trash mr-1"></i>删除已在库 {{ aiExistsCount() }}
+                </button>
                 <small class="text-muted d-none d-md-inline">按上表文件名重命名后转存（一次性，不创建任务）</small>
               </div>
 
@@ -1244,6 +1262,8 @@
         aiCandidatesCollapsed: false,
         aiFilter: 'all',
         aiScrollTarget: '',
+        aiAnalyzeSeq: 0,
+        aiDeleting: false,
         aiSearchElapsed: 0,
         aiSearchTimer: null,
         aiCommitLog: "",
@@ -1429,6 +1449,9 @@
           if (!this.aiForm.shareurl) { this.showToast('请先选择一个候选链接', 'warning'); return; }
           this.aiAnalyzing = true;
           this.aiError = '';
+          // 请求序号：切换链接时旧请求可能后返回，避免用旧结果覆盖新结果
+          const seq = (this.aiAnalyzeSeq || 0) + 1;
+          this.aiAnalyzeSeq = seq;
           axios.post('/ai/analyze', {
             shareurl: this.aiForm.shareurl,
             savepath: this.aiForm.savepath,
@@ -1438,8 +1461,14 @@
             suggest_rule: !!suggestRule
           })
             .then(response => {
+              if (seq !== this.aiAnalyzeSeq) return;   // 已有更新的请求，丢弃这次结果
               const res = response.data;
-              if (!res.success) { this.aiError = res.message || '分析失败'; return; }
+              if (!res.success) {
+                // 关键：失败时必须清空上一次的结果，否则会一直显示上一个链接的文件
+                this.aiAnalysis = null;
+                this.aiError = res.message || '分析失败';
+                return;
+              }
               const data = res.data;
               data.rows.forEach(row => { row.selected = !!row.default_selected; });
               this.aiAnalysis = data;
@@ -1461,8 +1490,14 @@
                 }
               });
             })
-            .catch(error => { this.aiError = '分析请求失败：' + error; })
-            .finally(() => { this.aiAnalyzing = false; });
+            .catch(error => {
+              if (seq !== this.aiAnalyzeSeq) return;
+              this.aiAnalysis = null;
+              this.aiError = '分析请求失败：' + error;
+            })
+            .finally(() => {
+              if (seq === this.aiAnalyzeSeq) this.aiAnalyzing = false;
+            });
         },
         aiApplyPreset() {
           const preset = (this.formData.magic_regex || {})[this.aiForm.pattern];
@@ -1477,6 +1512,44 @@
           this.aiAnalyze();
         },
         // 季号对应的子目录名（S04 = 第 4 季）
+        // 删除库里已存在的同名文件（移入回收站，可恢复）
+        aiDeleteNames(names, label) {
+          if (!names.length) return;
+          const tip = '确定删除' + label + '这 ' + names.length + ' 个文件？\n\n'
+            + names.slice(0, 10).join('\n')
+            + (names.length > 10 ? '\n…（共 ' + names.length + ' 个）' : '')
+            + '\n\n位置：' + this.aiForm.savepath
+            + '\n（会移到网盘回收站，可以恢复）';
+          if (typeof window !== 'undefined' && window.confirm && !window.confirm(tip)) return;
+          this.aiDeleting = true;
+          axios.post('/ai/delete', {
+            savepath: this.aiForm.savepath,
+            file_names: names
+          }).then(response => {
+            const res = response.data;
+            if (!res.success) { this.showToast(res.message || '删除失败', 'error'); return; }
+            const d = res.data;
+            if (d.ok) {
+              this.showToast('已删除 ' + d.deleted.length + ' 个文件（在回收站可恢复）', 'success');
+            } else {
+              this.showToast('删除未成功：' + (d.message || '未知原因'), 'error');
+            }
+            this.aiAnalyze();
+          }).catch(error => { this.showToast('删除请求失败：' + error, 'error'); })
+            .finally(() => { this.aiDeleting = false; });
+        },
+        aiDeleteRow(row) {
+          const libName = row && row.lib_name;
+          if (!libName) return;
+          this.aiDeleteNames([libName], '库里的「' + libName + '」');
+        },
+        aiDeleteAllExists() {
+          const rows = ((this.aiAnalysis && this.aiAnalysis.rows) || []).filter(r => r.lib_name);
+          this.aiDeleteNames(rows.map(r => r.lib_name), '库里这些已存在的文件');
+        },
+        aiExistsCount() {
+          return ((this.aiAnalysis && this.aiAnalysis.rows) || []).filter(r => r.lib_name).length;
+        },
         aiSeasonDir() {
           const n = parseInt(this.aiForm.season, 10);
           return n > 0 ? ('S' + String(n).padStart(2, '0')) : '';
