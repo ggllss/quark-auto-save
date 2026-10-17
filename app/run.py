@@ -353,6 +353,34 @@ def _season_from_share(items):
     return (season, hits) if hits >= 2 else (None, hits)
 
 
+# Kodi/Emby 的辅助文件：海报、fanart、nfo、字幕等，不参与重命名
+_AUX_EXTS = (
+    ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn",
+    ".nfo", ".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup",
+    ".txt", ".md5", ".sfv", ".torrent",
+)
+
+
+def _is_aux_file(name):
+    """海报/nfo/字幕这类辅助文件，不当作正片处理"""
+    return os.path.splitext(str(name or ""))[1].lower() in _AUX_EXTS
+
+
+def _seasons_in_share(items):
+    """分享里出现了哪些季（一个链接可能整季打包，S01…S05 各一个目录）"""
+    seasons = set()
+    for it in items or []:
+        for text in (it.get("dir_path") or "", it.get("file_name") or ""):
+            text = _strip_media_ext(str(text or ""))
+            for piece in [text] + [x for x in text.split("/") if x]:
+                if re.fullmatch(r"[\d\s._-]+", piece.strip() or "x"):
+                    continue
+                season = _season_of_text(piece)
+                if season:
+                    seasons.add(season)
+    return seasons
+
+
 def _pansou_servers(ps_data):
     """
     解析 PanSou 实例列表，支持三种写法：
@@ -1408,10 +1436,18 @@ def ai_analyze():
     except Exception as e:
         return jsonify({"success": False, "message": f"解析分享失败：{e}"})
 
-    # ①b 季号：优先信分享内容自带的季号，目标路径还没有 Sxx 时自动补上
+    # ①b 季号：优先信分享内容自带的季号
+    share_seasons = _seasons_in_share(share_list)
     share_season, share_season_hits = _season_from_share(share_list)
     season_note = ""
-    if share_season:
+    multi_season = len(share_seasons) > 1
+    if multi_season:
+        # 一个链接整季打包：每季各进各的 Sxx，不能只套一个
+        season_note = "分享里有 %d 季（%s），会分别入库到各自的 Sxx 子目录" % (
+            len(share_seasons),
+            "、".join("S%02d" % n for n in sorted(share_seasons)),
+        )
+    elif share_season:
         _tail = savepath.rstrip("/").rsplit("/", 1)[-1] or ""
         _cur = int(_tail[1:]) if re.fullmatch(r"[Ss]\d{1,2}", _tail) else None
         if _cur is None:
@@ -1580,6 +1616,28 @@ def ai_analyze():
             else f"{taskname}.S00E{_num:02d}{_ext}"
         )
 
+    # 一个分享里有多季时，每季各自比对各自的目录（不能拿 S04 的文件去比 S01）
+    show_root = savepath_norm
+    _tail0 = show_root.rstrip("/").rsplit("/", 1)[-1] or ""
+    if re.fullmatch(r"[Ss]\d{1,2}", _tail0):
+        show_root = show_root.rstrip("/")[: -(len(_tail0) + 1)] or "/"
+    season_dir_names = {}
+    if multi_season:
+        for _sn in sorted(share_seasons):
+            _p = "%s/S%02d" % (show_root.rstrip("/"), _sn)
+            try:
+                _fids = account.get_fids([_p])
+                if not _fids:
+                    season_dir_names[_sn] = []
+                    continue
+                _ls = account.ls_dir(_fids[0]["fid"])
+                season_dir_names[_sn] = [
+                    x.get("file_name")
+                    for x in ((_ls.get("data") or {}).get("list") or [])
+                ]
+            except Exception:  # noqa: BLE001
+                season_dir_names[_sn] = []
+
     # 库里已有文件的季集索引，用于识别「同一集但文件名不同」的重复
     dir_content = [(n, content_key(n)) for n in dir_names]
     dir_se = []
@@ -1639,8 +1697,13 @@ def ai_analyze():
                 }
             )
         else:
+            # 海报/nfo/字幕这类辅助文件单独标记，默认不选
+            is_aux = _is_aux_file(name)
             # 花絮素材（先导/纯享/花絮/加更…）统一收进 S00，不套用正片规则
-            is_extra = _is_extra_file(name)
+            is_extra = (not is_aux) and _is_extra_file(name)
+            row_season = None
+            row_target = savepath_norm
+            row_dir = ""
             if is_extra:
                 # 花絮素材要同时比对 S00 和正片目录：
                 # 用户历史库里这类素材多半还留在 S04，不能因为换了归档位置就重下一遍。
@@ -1650,21 +1713,39 @@ def ai_analyze():
                 cmp_content = extra_content + dir_content
                 cmp_se = []
             else:
-                cmp_names = dir_names
-                cmp_content = dir_content
-                cmp_se = dir_se
+                # 一个链接整季打包时，按文件自己所属的季分别入库
+                row_season = _season_of_text(f.get("dir_path") or "") or _season_of_text(name)
+                if multi_season and row_season:
+                    _names = season_dir_names.get(row_season) or []
+                    cmp_names = _names
+                    cmp_content = [(n, content_key(n)) for n in _names]
+                    cmp_se = [
+                        (s2, e2)
+                        for (s2, e2) in (_extract_se(n, mr) for n in _names)
+                        if e2 is not None
+                    ]
+                    row_target = "%s/S%02d" % (show_root.rstrip("/"), row_season)
+                    row_dir = "S%02d" % row_season
+                else:
+                    cmp_names = dir_names
+                    cmp_content = dir_content
+                    cmp_se = dir_se
             row["is_extra"] = is_extra
+            row["aux"] = is_aux
             if is_extra:
                 _hit = tmdb_map.get(name) or {}
                 if _hit.get("number"):
                     row["tmdb_episode"] = _hit.get("number")
                     row["tmdb_match"] = _hit.get("by") or ""
                     row["tmdb_name"] = _hit.get("name") or ""
-            row["target_savepath"] = extra_dir if is_extra else savepath_norm
-            row["target_dir"] = "S00" if is_extra else ""
+            row["target_savepath"] = extra_dir if is_extra else row_target
+            row["target_dir"] = "S00" if is_extra else row_dir
             if is_extra:
                 in_rule = True
                 new_name = extra_new.get(f.get("fid")) or name
+            elif is_aux:
+                in_rule = False          # 辅助文件不套正片规则
+                new_name = name
             else:
                 in_rule = (
                     bool(re.search(rule_pattern, name))
@@ -1735,6 +1816,12 @@ def ai_analyze():
             if r.get("status") in ("new", "dup_episode", "unmatched"):
                 r["status_text"] = r["status_text"] + "（与其他文件重名）"
 
+    # 海报/nfo 这类辅助文件单独标一下，别混在「不匹配规则」里
+    for _r in rows:
+        if _r.get("aux") and _r.get("status") == "unmatched":
+            _r["status_text"] = "辅助文件（海报/nfo）"
+            _r["default_selected"] = False
+
     # 排序：先按状态分组（能直接入库的排前面，「不匹配规则」「已在库」放后面），
     # 组内按文件名里的日期倒序——最新的集数排最前面，方便直接勾新出的那几集
     _status_order = {"new": 0, "dup_episode": 1, "folder": 2, "unmatched": 3,
@@ -1760,7 +1847,8 @@ def ai_analyze():
         "new": sum(1 for r in rows if r["status"] == "new"),
         "exists": sum(1 for r in rows if r["status"] == "exists"),
         "dup_episode": sum(1 for r in rows if r["status"] == "dup_episode"),
-        "unmatched": sum(1 for r in rows if r["status"] == "unmatched"),
+        "unmatched": sum(1 for r in rows if r["status"] == "unmatched" and not r.get("aux")),
+        "aux": sum(1 for r in rows if r.get("aux")),
         "folder": sum(1 for r in rows if r["status"] == "folder"),
         "collision": sum(1 for r in rows if r.get("collision")),
         "extra": sum(1 for r in rows if r.get("is_extra")),
@@ -1773,6 +1861,8 @@ def ai_analyze():
         "savepath_exists": savepath_exists,
         # 分享内容里识别出的季号（自动套 Sxx 用），以及给用户的说明
         "season_from_share": share_season,
+        "share_seasons": sorted(share_seasons),
+        "multi_season": multi_season,
         "season_from_share_hits": share_season_hits,
         "season_note": season_note,
         "dir_note": dir_note,

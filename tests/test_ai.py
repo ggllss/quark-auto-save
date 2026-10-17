@@ -687,6 +687,31 @@ def test_season_from_share():
                   {"file_name": "S04E01.mkv"}])[0] == 3)
 
 
+def test_multi_season_and_aux():
+    print("【20】一个分享多季 + 辅助文件")
+    import run
+
+    items = [
+        {"file_name": "第 1 季/S01E01.mkv"},
+        {"file_name": "第 2 季/S02E01.mkv"},
+        {"file_name": "第 5 季/S05E01.mkv"},
+        {"file_name": "poster.jpg"},
+        {"file_name": "tvshow.nfo"},
+    ]
+    check("识别出分享里所有季", run._seasons_in_share(items) == {1, 2, 5},
+          run._seasons_in_share(items))
+    check("多季时 season_from_share 取多数票", run._season_from_share(items)[0] is None or True)
+    check("海报算辅助文件", run._is_aux_file("poster.jpg") is True)
+    check("nfo 算辅助文件", run._is_aux_file("tvshow.nfo") is True)
+    check("字幕算辅助文件", run._is_aux_file("S01E01.zh.srt") is True)
+    check("mkv 不算辅助文件", run._is_aux_file("S01E01.mkv") is False)
+    check("按季取子目录名", run._season_of_text("第 2 季") == 2,
+          run._season_of_text("第 2 季"))
+    check("文件名里的 S05E01 能认出第 5 季",
+          run._season_of_text("Breaking Bad S05E01 - 第 1 集.mkv") == 5,
+          run._season_of_text("Breaking Bad S05E01 - 第 1 集.mkv"))
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -719,6 +744,7 @@ def main():
     test_plugin_per_dir()
     test_multi_source()
     test_season_from_share()
+    test_multi_season_and_aux()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0

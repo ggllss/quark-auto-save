@@ -762,6 +762,10 @@
             <!-- 步骤3：分析结果 + 规则编辑 -->
             <div v-if="aiAnalysis" id="aiAnalysisAnchor" class="ai-has-actionbar">
               <hr>
+              <!-- 一个分享里有多季 / 按分享内容自动识别出季号时，明确告知 -->
+              <div v-if="aiAnalysis.season_note" class="alert alert-info py-2 small">
+                <i class="bi bi-layers mr-1"></i>{{ aiAnalysis.season_note }}
+              </div>
               <!-- 摘要条：手机上默认收起设置，这里一眼看到类型、季号与入库位置 -->
               <div class="d-flex align-items-start mb-2 small">
                 <div class="flex-fill text-break" style="min-width:0">
@@ -1653,7 +1657,10 @@
               this.aiFilter = 'all';
               // 后端按分享内容识别出的季号/路径要回填，否则界面还显示旧路径
               if (data.savepath) this.aiForm.savepath = data.savepath;
-              if (data.season_from_share) this.aiForm.season = data.season_from_share;
+              // 一个分享里有多季时不回填单一季号（每行各有自己的 Sxx）
+              if (data.season_from_share && !data.multi_season) {
+                this.aiForm.season = data.season_from_share;
+              }
               if (suggestRule && data.rule_suggestion && !data.rule_suggestion.error) {
                 const sug = data.rule_suggestion;
                 if (sug.pattern) this.aiForm.pattern = sug.pattern;
