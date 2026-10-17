@@ -908,6 +908,18 @@
                 <button class="btn btn-sm btn-outline-success d-md-none flex-shrink-0" type="button"
                         @click="aiSelectOnlyNew()">只选可新增</button>
               </div>
+              <!-- 排序方式：默认按状态分组，也可以纯按时间/名称 -->
+              <div class="d-flex align-items-center mb-2 small">
+                <span class="text-muted mr-2 flex-shrink-0">
+                  <i class="bi bi-sort-down mr-1"></i>排序
+                </span>
+                <select class="form-control form-control-sm" style="max-width:168px" v-model="aiSort">
+                  <option value="status">状态分组（默认）</option>
+                  <option value="time">时间 新→旧</option>
+                  <option value="name">重命名后名称</option>
+                  <option value="source">原文件名</option>
+                </select>
+              </div>
               <div class="mb-2 small text-muted">
                 <span v-if="aiAnalysis.stats.unmatched">不匹配规则 {{ aiAnalysis.stats.unmatched }} · </span>
                 <span v-if="aiAnalysis.stats.folder">文件夹 {{ aiAnalysis.stats.folder }} · </span>
@@ -1339,6 +1351,10 @@
         aiScrollTarget: '',
         aiAnalyzeSeq: 0,
         aiManualOpen: false,
+        // 列表排序：status=状态分组（默认） / time / name / source
+        aiSort: 'status',
+        // 用户手动改过规则预设就不再自动覆盖
+        aiPatternTouched: false,
         // 每个候选分享的最新文件预览：{ [shareurl]: {loading, items, total, error} }
         aiLatest: {},
         aiAnalyzeElapsed: 0,
@@ -1422,6 +1438,12 @@
           }
           this.aiForm.season = (resolved.season === null || resolved.season === undefined) ? '' : resolved.season;
           if (resolved.savepath) this.aiForm.savepath = resolved.savepath;
+          // 规则预设跟着内容走：综艺用 $ZONGYI_MAGIC、剧集用 $TV_MAGIC，
+          // 命中已有任务时沿用它的命名习惯；用户手动选过就不再覆盖
+          if (resolved.suggested_pattern && !this.aiPatternTouched) {
+            this.aiForm.pattern = resolved.suggested_pattern;
+            this.aiForm.replace = resolved.suggested_replace || '';
+          }
         },
         // 类型或季号变化后重新解析入库位置
         aiResolvePath() {
@@ -1478,6 +1500,8 @@
           this.aiSelectedCandidate = null;
           this.aiCandidateIndex = -1;
           this.aiCandidatesCollapsed = false;
+          this.aiPatternTouched = false;
+          this.aiSort = 'status';
           // 公共搜索源慢的时候要等一两分钟，给个秒数让用户知道没卡死
           this.aiSearchElapsed = 0;
           if (this.aiSearchTimer) clearInterval(this.aiSearchTimer);
@@ -1627,6 +1651,9 @@
               data.rows.forEach(row => { row.selected = !!row.default_selected; });
               this.aiAnalysis = data;
               this.aiFilter = 'all';
+              // 后端按分享内容识别出的季号/路径要回填，否则界面还显示旧路径
+              if (data.savepath) this.aiForm.savepath = data.savepath;
+              if (data.season_from_share) this.aiForm.season = data.season_from_share;
               if (suggestRule && data.rule_suggestion && !data.rule_suggestion.error) {
                 const sug = data.rule_suggestion;
                 if (sug.pattern) this.aiForm.pattern = sug.pattern;
@@ -1659,6 +1686,7 @@
             });
         },
         aiApplyPreset() {
+          this.aiPatternTouched = true;
           const preset = (this.formData.magic_regex || {})[this.aiForm.pattern];
           if (preset) this.aiForm.replace = preset.replace;
           this.aiAnalyze();
@@ -1723,15 +1751,32 @@
           return row.status !== 'exists';
         },
         // 状态筛选后可见的行。勾选与全选只作用于可见行，所见即所得
+        // 列表排序：状态分组保持后端顺序；其余三种是纯排序，可手动切换
+        aiSortRows(rows) {
+          const mode = this.aiSort;
+          if (mode === 'status') return rows;
+          const list = rows.slice();
+          if (mode === 'name') {
+            return list.sort((a, b) =>
+              String(a.new_name || '').localeCompare(String(b.new_name || ''), 'zh-CN', {numeric: true}));
+          }
+          if (mode === 'source') {
+            return list.sort((a, b) =>
+              String(a.file_name || '').localeCompare(String(b.file_name || ''), 'zh-CN', {numeric: true}));
+          }
+          // time：文件名里的日期新→旧，没有日期用文件修改时间兜底
+          return list.sort((a, b) =>
+            ((b.date_key || 0) - (a.date_key || 0)) || ((b.updated_at || 0) - (a.updated_at || 0)));
+        },
         aiFilteredRows() {
           const rows = (this.aiAnalysis && this.aiAnalysis.rows) || [];
-          if (this.aiFilter === 'new') return rows.filter(r => r.status === 'new');
-          if (this.aiFilter === 'dup') return rows.filter(r => r.status === 'dup_episode');
+          if (this.aiFilter === 'new') return this.aiSortRows(rows.filter(r => r.status === 'new'));
+          if (this.aiFilter === 'dup') return this.aiSortRows(rows.filter(r => r.status === 'dup_episode'));
           if (this.aiFilter === 'unmatched') {
-            return rows.filter(r => r.status === 'unmatched' || r.status === 'rule_error');
+            return this.aiSortRows(rows.filter(r => r.status === 'unmatched' || r.status === 'rule_error'));
           }
-          if (this.aiFilter === 'exists') return rows.filter(r => r.status === 'exists');
-          return rows;
+          if (this.aiFilter === 'exists') return this.aiSortRows(rows.filter(r => r.status === 'exists'));
+          return this.aiSortRows(rows);
         },
         aiFilterCount(key) {
           const rows = (this.aiAnalysis && this.aiAnalysis.rows) || [];

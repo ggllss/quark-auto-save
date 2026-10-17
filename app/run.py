@@ -273,6 +273,86 @@ def run_script_now():
     )
 
 
+# 季号写法：S02E01 / S02 / Season 2 / 第二季（「第2期」是综艺的期号，不算季）
+_SEASON_RES = (
+    re.compile(r"[Ss](\d{1,2})(?=[Ee]|[.\-_ \]]|$)"),
+    re.compile(r"[Ss]eason\s*(\d{1,2})", re.I),
+    re.compile(r"第\s*([0-9一二三四五六七八九十]{1,3})\s*季"),
+)
+_PERIOD_RE = re.compile(r"第\s*[0-9一二三四五六七八九十]{1,3}\s*[期集]")
+
+
+# 常见媒体后缀：不去掉的话「xxx.mp4」里的 4 会被当成季号
+_MEDIA_EXTS = (
+    ".mp4", ".mkv", ".avi", ".ts", ".m2ts", ".rmvb", ".flv", ".wmv",
+    ".mov", ".mpg", ".mpeg", ".iso", ".strm", ".webm",
+)
+
+
+def _strip_media_ext(text):
+    low = text.lower()
+    for ext in _MEDIA_EXTS:
+        if low.endswith(ext):
+            return text[: -len(ext)]
+    return text
+
+
+def _season_of_text(text):
+    """从一段文字里认出季号，认不出返回 None"""
+    text = _strip_media_ext(str(text or "").strip())
+    if not text:
+        return None
+    for pat in _SEASON_RES:
+        m = pat.search(text)
+        if not m:
+            continue
+        token = m.group(1)
+        if token.isdigit():
+            return int(token)
+        season = ai._CN_NUM.get(token)
+        if season:
+            return season
+    # 「第N期/第N集」是综艺的期号，不能当季号
+    if _PERIOD_RE.search(text):
+        return None
+    _stem, season = ai.split_season(text)
+    return season
+
+
+def _season_from_share(items):
+    """
+    从分享内容判断这是第几季。
+
+    分享里的文件名/目录名一般自带季号（Breaking.Bad.S02E01、
+    绝命毒师 第二季、喜人奇妙夜2），比去问 TMDB 可靠——
+    分享本身就说清了是第几季。返回 (季号, 命中次数)。
+    """
+    votes = {}
+    for it in items or []:
+        pieces = []
+        for text in (it.get("dir_path") or "", it.get("file_name") or ""):
+            text = _strip_media_ext(str(text or ""))
+            if not text:
+                continue
+            pieces.append(text)
+            pieces.extend(p for p in text.split("/") if p)
+        seen = set()
+        for piece in pieces:
+            piece = piece.strip()
+            # 纯数字片段（01、2026）不是季号，跳过
+            if not piece or re.fullmatch(r"[\d\s._-]+", piece):
+                continue
+            season = _season_of_text(piece)
+            if season and season not in seen:
+                seen.add(season)
+                votes[season] = votes.get(season, 0) + 1
+    if not votes:
+        return None, 0
+    season, hits = max(votes.items(), key=lambda kv: kv[1])
+    # 只命中一两个文件时可能只是巧合（比如某一集的名字里带数字），不下结论
+    return (season, hits) if hits >= 2 else (None, hits)
+
+
 def _pansou_servers(ps_data):
     """
     解析 PanSou 实例列表，支持三种写法：
@@ -834,6 +914,28 @@ def ai_resolve_path():
     except Exception as e:
         return jsonify({"success": False, "message": f"解析入库路径失败：{e}"})
     data["category_options"] = _TYPE_NAMES
+    # 推荐规则预设：命中的任务优先（沿用它的命名习惯），
+    # 否则按类型选——综艺一期分上下集用 $ZONGYI_MAGIC，剧集用 $TV_MAGIC
+    suggested = ""
+    suggested_replace = ""
+    try:
+        _task, _ = _match_task_by_title(title)
+        if _task and (_task.get("pattern") or "").strip():
+            suggested = _task["pattern"].strip()
+            suggested_replace = _task.get("replace") or ""
+    except Exception:  # noqa: BLE001
+        pass
+    if not suggested:
+        presets = config_data.get("magic_regex") or {}
+        cat = data.get("category") or category
+        if cat == "综艺" and "$ZONGYI_MAGIC" in presets:
+            suggested = "$ZONGYI_MAGIC"
+        elif "$TV_MAGIC" in presets:
+            suggested = "$TV_MAGIC"
+        if suggested:
+            suggested_replace = (presets.get(suggested) or {}).get("replace") or ""
+    data["suggested_pattern"] = suggested
+    data["suggested_replace"] = suggested_replace
     return jsonify({"success": True, "data": data})
 
 
@@ -1306,6 +1408,18 @@ def ai_analyze():
     except Exception as e:
         return jsonify({"success": False, "message": f"解析分享失败：{e}"})
 
+    # ①b 季号：优先信分享内容自带的季号，目标路径还没有 Sxx 时自动补上
+    share_season, share_season_hits = _season_from_share(share_list)
+    season_note = ""
+    if share_season:
+        _tail = savepath.rstrip("/").rsplit("/", 1)[-1] or ""
+        _cur = int(_tail[1:]) if re.fullmatch(r"[Ss]\d{1,2}", _tail) else None
+        if _cur is None:
+            savepath = savepath.rstrip("/") + "/S%02d" % share_season
+            season_note = "按分享内容识别为第 %d 季，已自动套 S%02d 子目录" % (share_season, share_season)
+        elif _cur != share_season:
+            season_note = "分享内容像第 %d 季，但目标目录是 S%02d，请确认" % (share_season, _cur)
+
     # ② 目标目录已有文件
     dir_names = []
     savepath_exists = False
@@ -1657,6 +1771,10 @@ def ai_analyze():
         "stats": stats,
         "savepath": savepath_norm,
         "savepath_exists": savepath_exists,
+        # 分享内容里识别出的季号（自动套 Sxx 用），以及给用户的说明
+        "season_from_share": share_season,
+        "season_from_share_hits": share_season_hits,
+        "season_note": season_note,
         "dir_note": dir_note,
         "extra_dir": extra_dir,
         "episode_base": episode_base,

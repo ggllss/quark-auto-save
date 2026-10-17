@@ -602,6 +602,40 @@ async function testMobileInteraction() {
   check('候选卡片显示分享里最新的文件', html.includes('最新：{{ cand.latest_file }}'));
   check('候选列表给底部操作条留白', /class="ai-has-actionbar"/.test(html));
 
+  // 排序：默认状态分组，可手动切成时间/名称
+  check('有排序选择器', html.includes('v-model="aiSort"') && html.includes('时间 新→旧'));
+  const sortRows = [
+    { file_name: 'b.mp4', new_name: '现在就出发.E02.mkv', date_key: 20261010, updated_at: 1 },
+    { file_name: 'a.mp4', new_name: '现在就出发.E03.mkv', date_key: 20261017, updated_at: 2 },
+    { file_name: 'c.mp4', new_name: '现在就出发.E01.mkv', date_key: 20261001, updated_at: 3 },
+  ];
+  ctx.aiSort = 'time';
+  check('按时间排序：新的在前',
+    ctx.aiSortRows(sortRows).map(r => r.file_name).join(',') === 'a.mp4,b.mp4,c.mp4',
+    ctx.aiSortRows(sortRows).map(r => r.file_name));
+  ctx.aiSort = 'name';
+  check('按重命名后的名称排序',
+    ctx.aiSortRows(sortRows).map(r => r.file_name).join(',') === 'c.mp4,b.mp4,a.mp4',
+    ctx.aiSortRows(sortRows).map(r => r.file_name));
+  ctx.aiSort = 'source';
+  check('按原文件名排序',
+    ctx.aiSortRows(sortRows).map(r => r.file_name).join(',') === 'a.mp4,b.mp4,c.mp4');
+  ctx.aiSort = 'status';
+  check('状态分组保持原顺序',
+    ctx.aiSortRows(sortRows).map(r => r.file_name).join(',') === 'b.mp4,a.mp4,c.mp4');
+
+  // 预设规则跟着内容自动切换
+  ctx.aiPatternTouched = false;
+  ctx.aiForm.pattern = '$TV_MAGIC';
+  ctx.aiApplyResolved({ category: '综艺', season: 4, savepath: '/x/S04',
+                        suggested_pattern: '$ZONGYI_MAGIC', suggested_replace: 'Z' });
+  check('搜到综艺时自动换成综艺规则', ctx.aiForm.pattern === '$ZONGYI_MAGIC', ctx.aiForm.pattern);
+  ctx.aiPatternTouched = true;   // 用户手动改过
+  ctx.aiApplyResolved({ category: '电视剧', season: 2, savepath: '/y/S02',
+                        suggested_pattern: '$TV_MAGIC', suggested_replace: 'T' });
+  check('用户手动选过预设就不再被覆盖', ctx.aiForm.pattern === '$ZONGYI_MAGIC', ctx.aiForm.pattern);
+  ctx.aiPatternTouched = false;
+
   check('列表里有单条删除按钮', html.includes('aiDeleteRow(row)'));
   check('默认进入 AI 追剧页', html.includes("activeTab: 'ai'"));
   check('分析计时用 setTimeout 链（请求结束即停，不会泄漏）',

@@ -657,6 +657,36 @@ def test_multi_source():
     check("空配置返回空列表", run._pansou_servers({}) == [])
 
 
+def test_season_from_share():
+    print("【19】从分享内容识别季号（不查 TMDB）")
+    import run
+
+    def detect(items):
+        return run._season_from_share(items)
+
+    check("美剧 S02E01 写法",
+          detect([{"file_name": "Breaking.Bad.S02E01.mkv"},
+                  {"file_name": "Breaking.Bad.S02E02.mkv"}])[0] == 2,
+          detect([{"file_name": "Breaking.Bad.S02E01.mkv"},
+                  {"file_name": "Breaking.Bad.S02E02.mkv"}]))
+    check("中文「第二季」目录",
+          detect([{"file_name": "01.mkv", "dir_path": "绝命毒师 第二季"},
+                  {"file_name": "02.mkv", "dir_path": "绝命毒师 第二季"}])[0] == 2)
+    check("剧名带季号「喜人奇妙夜2」",
+          detect([{"file_name": "喜人奇妙夜2/01.mp4"},
+                  {"file_name": "喜人奇妙夜2/02.mp4"}])[0] == 2)
+    check("综艺「第1期上」不误判成季号",
+          detect([{"file_name": "第1期上.mp4"},
+                  {"file_name": "第1期下.mp4"}])[0] is None,
+          detect([{"file_name": "第1期上.mp4"}, {"file_name": "第1期下.mp4"}]))
+    check("只有一个文件命中时不下结论",
+          detect([{"file_name": "S05E01.mkv"}])[0] is None,
+          detect([{"file_name": "S05E01.mkv"}]))
+    check("多数票优先（合集里混了多季）",
+          detect([{"file_name": "S03E01.mkv"}, {"file_name": "S03E02.mkv"},
+                  {"file_name": "S04E01.mkv"}])[0] == 3)
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -688,6 +718,7 @@ def main():
     test_tmdb_specials()
     test_plugin_per_dir()
     test_multi_source()
+    test_season_from_share()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0

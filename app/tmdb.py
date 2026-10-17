@@ -305,3 +305,32 @@ def specials_for_show(api_key, taskname, filenames, season=None):
         if hit and hit.get("number"):
             out[fn] = hit
     return out
+
+
+def seasons_for_show(api_key, name):
+    """
+    这部剧有哪些季（返回季号列表，按播出时间从早到晚）。
+
+    库里还没有这部剧本季目录时，用它推断「现在更新到第几季」，
+    好自动建出 Sxx 子目录。
+    """
+    if not api_key or not name:
+        return []
+    tv_id = resolve_show(api_key, name)   # 返回的是剧集 id（int）
+    if not tv_id:
+        return []
+
+    def _fetch():
+        data = _request(api_key, "/tv/%s" % tv_id)
+        rows = []
+        for season in data.get("seasons") or []:
+            number = season.get("season_number")
+            if not isinstance(number, int) or number < 1:
+                continue
+            if not (season.get("episode_count") or 0):
+                continue
+            rows.append((season.get("air_date") or "", number))
+        rows.sort()
+        return [n for _, n in rows]
+
+    return _cached(("seasons", tv_id), _fetch)
