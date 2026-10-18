@@ -315,6 +315,14 @@ def _season_of_text(text):
     # 「第N期/第N集」是综艺的期号，不能当季号
     if _PERIOD_RE.search(text):
         return None
+    # 分享常用「[王牌对王牌4][2019]」这种带括号的写法：
+    # 先把括号里的 4 位年份摘掉，再剥掉括号本身，才认得出季号 4
+    cleaned = re.sub(r"[(（\[【]\s*(?:19|20)\d{2}\s*[)）\]】]", " ", text)
+    cleaned = re.sub(r"[()（）\[\]【】]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    _stem, season = ai.split_season(cleaned)
+    if season:
+        return season
     _stem, season = ai.split_season(text)
     return season
 
@@ -414,6 +422,46 @@ def _movie_version(name):
 def _is_aux_file(name):
     """海报/nfo/字幕这类辅助文件，不当作正片处理"""
     return os.path.splitext(str(name or ""))[1].lower() in _AUX_EXTS
+
+
+def _air_date(name, dir_path=""):
+    """
+    从文件名/路径里还原播出日期（YYYY-MM-DD）。
+
+    综艺常见两种写法：20250830.笑点浓缩版.mp4（带年）、
+    12.08.mp4（只有月日，年份在上级目录 2023/ 里）。
+    """
+    text = _strip_media_ext(str(name or ""))
+    date = tmdb.name_date(text)
+    if date:
+        return date
+    m = re.search(r"(?<!\d)(\d{1,2})[.\-_月](\d{1,2})(?!\d)", text)
+    if not m:
+        return None
+    month, day = int(m.group(1)), int(m.group(2))
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    year = ""
+    for piece in reversed(str(dir_path or "").split("/")):
+        y = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", piece)
+        if y:
+            year = y.group(1)
+            break
+    if not year:
+        return None
+    return "%s-%02d-%02d" % (year, month, day)
+
+
+def _season_of_path(dir_path):
+    """从目录路径里逐段找季号（整条路径直接解析会串味）"""
+    for piece in str(dir_path or "").split("/"):
+        piece = piece.strip()
+        if not piece or re.fullmatch(r"[\d\s._-]+", piece):
+            continue
+        season = _season_of_text(piece)
+        if season:
+            return season
+    return None
 
 
 def _seasons_in_share(items):
@@ -1242,7 +1290,7 @@ def ai_search():
     )
 
 
-def _expand_share_files(account, pwd_id, stoken, root_fid="", max_depth=2, max_files=300):
+def _expand_share_files(account, pwd_id, stoken, root_fid="", max_depth=4, max_files=600):
     """
     递归展开分享里的文件夹，返回「文件级」条目（带所在目录）。
 
@@ -1488,7 +1536,7 @@ def ai_analyze():
         # 分享常常是「剧名/S04/E01.mkv」这种嵌套结构，用户要选的是文件。
         # 递归展开文件夹，直接列出每一集（超过上限的文件夹仍作为一行保留）
         share_list, truncated = _expand_share_files(
-            account, pwd_id, stoken, pdir_fid or ""
+            account, pwd_id, stoken, pdir_fid or "", max_depth=4, max_files=600
         )
         if not share_list:
             return jsonify({"success": False, "message": "分享为空，文件可能已被删除"})
@@ -1834,7 +1882,7 @@ def ai_analyze():
                 cmp_se = []
             else:
                 # 一个链接整季打包时，按文件自己所属的季分别入库
-                row_season = _season_of_text(f.get("dir_path") or "") or _season_of_text(name)
+                row_season = _season_of_path(f.get("dir_path")) or _season_of_text(name)
                 if multi_season and row_season:
                     _names = season_dir_names.get(row_season) or []
                     cmp_names = _names
@@ -1877,6 +1925,17 @@ def ai_analyze():
             elif is_aux:
                 in_rule = False          # 辅助文件不套正片规则
                 new_name = name
+            elif (not is_extra and not is_movie
+                  and not (rule_pattern and rule_ok and re.search(rule_pattern, name))):
+                # 规则匹配不上时，若文件名是日期（12.08.mp4 / 20250830.xxx.mp4），
+                # 用「剧名.播出日期」命名——Emby 会按播出日期匹配集数，
+                # 总比留着 12.08.mp4 这种名字刮削不出来强
+                _air = _air_date(name, f.get("dir_path"))
+                if _air:
+                    new_name = "%s.%s%s" % (taskname, _air, os.path.splitext(name)[1])
+                    in_rule = True
+                    row["date_named"] = True
+                    row["air_date"] = _air
             elif is_movie:
                 in_rule = True
                 new_name = row.get("_movie_name") or name
@@ -2127,7 +2186,7 @@ def _share_latest(account, shareurl, max_files=120):
     # 必须先带 _fetch_share=1 拉一次，后续 get_detail 才拿得到列表
     account.get_detail(pwd_id, stoken, pdir_fid or "", _fetch_share=1, fetch_share_full_path=1)
     items, truncated = _expand_share_files(
-        account, pwd_id, stoken, pdir_fid or "", max_depth=3, max_files=max_files
+        account, pwd_id, stoken, pdir_fid or "", max_depth=4, max_files=max_files
     )
     files = [i for i in items if not i.get("dir")]
     for f in files:
