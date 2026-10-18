@@ -1899,6 +1899,9 @@ def ai_analyze():
                 new_name = resolved_names.get(name) or (
                     mr.sub(rule_pattern, _tpl, name) if rule_ok else name
                 )
+            # 集号补零：S02E6 → S02E06（和库里其它文件保持一致）
+            if new_name and not is_movie:
+                new_name = re.sub(r"([Ss]\d\d[Ee])(\d)(?!\d)", r"\g<1>0\2", new_name)
             exists_orig = bool(mr.is_exists(name, cmp_names))
             exists_new = bool(mr.is_exists(new_name, cmp_names))
             row["new_name"] = new_name or name
