@@ -640,6 +640,21 @@ async function testMobileInteraction() {
   check('花絮标签只在花絮行显示', /v-if="row\.is_extra && row\.target_dir"[\s\S]{0,80}花絮素材 →/.test(html));
   check('正片多季行显示「分季 →」', html.includes('分季入库 →') || html.includes('分季 →'));
 
+  // 长文件名/长路径缩略
+  check('文件名用单行省略样式', html.includes('ai-name') && html.includes('ai-name-open'));
+  check('路径只显示最后两层',
+    ctx.aiShortPath('权力的游戏合集 4K蓝光 HDR 杜比视界/Game.of.Thrones.S04/Game.of.Thrones.S04E08.mkv')
+      === '…/Game.of.Thrones.S04/Game.of.Thrones.S04E08.mkv',
+    ctx.aiShortPath('权力的游戏合集 4K蓝光 HDR 杜比视界/Game.of.Thrones.S04/Game.of.Thrones.S04E08.mkv'));
+  check('短路径原样显示', ctx.aiShortPath('S04/') === 'S04', ctx.aiShortPath('S04/'));
+  check('空路径不报错', ctx.aiShortPath('') === '' && ctx.aiShortPath(null) === '');
+  ctx.aiExpanded = {};
+  const rowA = { fid: 'f1', file_name: 'a.mkv' };
+  ctx.aiToggleName(rowA);
+  check('点一下展开文件名', ctx.aiExpanded['f1'] === true, ctx.aiExpanded);
+  ctx.aiToggleName(rowA);
+  check('再点一下收起', ctx.aiExpanded['f1'] === false, ctx.aiExpanded);
+
   check('列表里有单条删除按钮', html.includes('aiDeleteRow(row)'));
   check('默认进入 AI 追剧页', html.includes("activeTab: 'ai'"));
   check('分析计时用 setTimeout 链（请求结束即停，不会泄漏）',

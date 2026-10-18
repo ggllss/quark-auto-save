@@ -25,6 +25,29 @@
       box-shadow: 0 -2px 10px rgba(0, 0, 0, .08);
     }
 
+    /* 长文件名/长路径：默认单行省略，点一下展开 */
+    .ai-name {
+      display: inline-block;
+      max-width: 100%;
+      vertical-align: bottom;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .ai-name-open {
+      white-space: normal;
+      word-break: break-all;
+    }
+    .ai-path {
+      display: inline-block;
+      max-width: 46%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: bottom;
+    }
+
     /* 分析结果滚动到顶部时，避开 sticky 的顶部导航 */
     #aiAnalysisAnchor, #aiAnalyzeProgress { scroll-margin-top: 64px; }
 
@@ -1003,8 +1026,11 @@
                           <i class="bi bi-trash"></i> 删除
                         </button>
                       </div>
-                      <div class="small text-muted text-break">
-                        <span v-if="row.dir_path" class="badge badge-light mr-1">{{ row.dir_path }}</span>{{ row.file_name }}
+                      <div class="small text-muted">
+                        <span v-if="row.dir_path" class="badge badge-light mr-1 ai-path"
+                              :title="row.dir_path">{{ aiShortPath(row.dir_path) }}</span>
+                        <span class="ai-name" :class="{'ai-name-open': aiExpanded[row.fid || row.file_name]}"
+                              :title="row.file_name" @click="aiToggleName(row)">{{ row.file_name }}</span>
                       </div>
                       <div class="small text-muted">
                         <span v-if="row.size">{{ row.size | size }}</span>
@@ -1051,8 +1077,10 @@
                               type="button" :disabled="aiDeleting" @click="aiDeleteRow(row)">删除</button>
                     </td>
                     <td>
-                      <span v-if="row.dir_path" class="badge badge-light mr-1">{{ row.dir_path }}</span>
-                      <small :title="row.file_name">{{ row.file_name }}</small>
+                      <span v-if="row.dir_path" class="badge badge-light mr-1 ai-path"
+                            :title="row.dir_path">{{ aiShortPath(row.dir_path) }}</span>
+                      <small class="ai-name" :class="{'ai-name-open': aiExpanded[row.fid || row.file_name]}"
+                             :title="row.file_name" @click="aiToggleName(row)">{{ row.file_name }}</small>
                       <small v-if="row.size" class="text-muted ml-1">{{ row.size | size }}</small>
                       <div v-if="row.dir_hint" class="small text-info">{{ row.dir_hint }}</div>
                     </td>
@@ -1376,6 +1404,8 @@
         aiManualOpen: false,
         // 列表排序：status=状态分组（默认） / time / name / source
         aiSort: 'status',
+        // 长文件名点开/收起：{ [fid 或文件名]: true }
+        aiExpanded: {},
         // 用户手动改过规则预设就不再自动覆盖
         aiPatternTouched: false,
         // 每个候选分享的最新文件预览：{ [shareurl]: {loading, items, total, error} }
@@ -1778,6 +1808,17 @@
           return row.status !== 'exists';
         },
         // 状态筛选后可见的行。勾选与全选只作用于可见行，所见即所得
+        // 长路径只显示最后两层，前面用 … 省略
+        aiShortPath(path) {
+          const parts = String(path || '').split('/').filter(Boolean);
+          if (parts.length <= 2) return parts.join('/');
+          return '…/' + parts.slice(-2).join('/');
+        },
+        // 长文件名：点一下展开/收起
+        aiToggleName(row) {
+          const key = row.fid || row.file_name;
+          this.$set(this.aiExpanded, key, !this.aiExpanded[key]);
+        },
         // 列表排序：状态分组保持后端顺序；其余三种是纯排序，可手动切换
         aiSortRows(rows) {
           const mode = this.aiSort;
