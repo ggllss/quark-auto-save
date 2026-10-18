@@ -358,6 +358,7 @@ _AUX_EXTS = (
     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tbn",
     ".nfo", ".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup",
     ".txt", ".md5", ".sfv", ".torrent",
+    ".azw3", ".azw", ".epub", ".mobi", ".pdf", ".cbz", ".cbr",
 )
 
 
@@ -1832,6 +1833,17 @@ def ai_analyze():
                     cmp_se = dir_se
             row["is_extra"] = is_extra
             row["aux"] = is_aux
+            # 目标季号：多季分享用该文件自己的季，否则用入库路径上的 Sxx
+            _season_label = ""
+            if row_dir:
+                _season_label = row_dir
+            else:
+                _t2 = savepath_norm.rstrip("/").rsplit("/", 1)[-1] or ""
+                if re.fullmatch(r"[Ss]\d{1,2}", _t2):
+                    _season_label = _t2.upper()
+                elif share_season:
+                    _season_label = "S%02d" % share_season
+            row["season_label"] = _season_label
             if is_extra:
                 _hit = tmdb_map.get(name) or {}
                 if _hit.get("number"):
@@ -1855,16 +1867,19 @@ def ai_analyze():
                     if (rule_pattern and rule_ok)
                     else True
                 )
+                _tpl = rule_replace or ""
                 _num = season_map.get(name)
-                if _num and re.search(r"\{I+\}", rule_replace or ""):
+                if _num and re.search(r"\{I+\}", _tpl):
                     # 把模板里的 {II} 换成 TMDB 的真实集号（补齐两位，和库里一致）
-                    _tpl = re.sub(r"\{I+\}", str(_num).zfill(2), rule_replace)
-                    new_name = mr.sub(rule_pattern, _tpl, name) if rule_ok else name
+                    _tpl = re.sub(r"\{I+\}", str(_num).zfill(2), _tpl)
                     row["tmdb_episode"] = _num
-                else:
-                    new_name = resolved_names.get(name) or (
-                        mr.sub(rule_pattern, rule_replace, name) if rule_ok else name
-                    )
+                # {SXX} 用目标目录的季号：综艺文件名里没有季标记，
+                # 让 MagicRename 从文件名猜会退回 S01（用户踩过这个坑）
+                if _season_label and re.search(r"\{SXX\}", _tpl):
+                    _tpl = _tpl.replace("{SXX}", _season_label)
+                new_name = resolved_names.get(name) or (
+                    mr.sub(rule_pattern, _tpl, name) if rule_ok else name
+                )
             exists_orig = bool(mr.is_exists(name, cmp_names))
             exists_new = bool(mr.is_exists(new_name, cmp_names))
             row["new_name"] = new_name or name
@@ -1900,20 +1915,72 @@ def ai_analyze():
             row["default_selected"] = row["status"] == "new"
         rows.append(row)
 
+    # 同一集有多个版本（1080p / 4K / 4K高码 / 60fps…）时，把版本标记补进文件名。
+    # 这类分享很常见：一集同时压了普通版和 4K 版，规则重命名后名字完全一样，
+    # 不处理就会互相覆盖。
+    def _version_tag(text):
+        tags = []
+        for pat, label in (
+            (r"2160p|\b4k\b", "4K"),
+            (r"1080p", "1080p"),
+            (r"720p", "720p"),
+            (r"高码", "高码"),
+            (r"60fps", "60fps"),
+            (r"hdr", "HDR"),
+            (r"\bdv\b|dolby", "DV"),
+        ):
+            if re.search(pat, str(text or ""), re.I):
+                tags.append(label)
+        return "".join(tags)
+
+    _groups = {}
+    for _r in rows:
+        if _r.get("dir") or _r.get("aux") or _r.get("movie_title"):
+            continue      # 电影的文件名里已经带版本了，不再叠加
+        _nm = (_r.get("new_name") or "").strip()
+        if _nm:
+            _groups.setdefault(((_r.get("target_savepath") or ""), _nm), []).append(_r)
+    for _key, _grp in _groups.items():
+        if len(_grp) < 2:
+            continue
+        _tags = [_version_tag(_r.get("file_name")) or "原版" for _r in _grp]
+        # 同集同版本的多份 = 重复文件：只留最大的一份，其余标记为重复
+        _by_tag = {}
+        for _r, _tag in zip(_grp, _tags):
+            _by_tag.setdefault(_tag, []).append(_r)
+        for _tag, _same in _by_tag.items():
+            if len(_same) < 2:
+                continue
+            _same.sort(key=lambda r: -(r.get("size") or 0))
+            for _dup in _same[1:]:
+                _dup["dup_copy"] = True
+                _dup["default_selected"] = False
+                _dup["status"] = "dup_copy"
+                _dup["status_text"] = "重复文件（同集同版本，已留一份）"
+        # 只有版本不同才需要改名区分
+        _keep = [r for r in _grp if not r.get("dup_copy")]
+        _keep_tags = [_version_tag(r.get("file_name")) or "原版" for r in _keep]
+        if len(_keep) < 2 or len(set(_keep_tags)) != len(_keep_tags):
+            continue
+        for _r, _tag in zip(_keep, _keep_tags):
+            _stem, _ext = os.path.splitext(_r["new_name"])
+            _r["new_name"] = "%s.%s%s" % (_stem, _tag, _ext)
+            _r["version_tag"] = _tag
+
     # 命名撞车检测：多个文件算出同一个名字，转存时会互相覆盖，
     # 这种情况通常说明所选规则把「第N期上/下」这类区分信息丢了
     # 只有「同一个目标目录 + 同一个文件名」才会真覆盖；
     # 辅助文件（海报/nfo）本来就不入库，也不参与判断
     name_count = {}
     for r in rows:
-        if r.get("dir") or r.get("aux"):
+        if r.get("dir") or r.get("aux") or r.get("dup_copy"):
             continue
         nm = (r.get("new_name") or "").strip()
         if nm:
             key = ((r.get("target_savepath") or ""), nm)
             name_count[key] = name_count.get(key, 0) + 1
     for r in rows:
-        if r.get("dir") or r.get("aux"):
+        if r.get("dir") or r.get("aux") or r.get("dup_copy"):
             continue
         nm = (r.get("new_name") or "").strip()
         if nm and name_count.get(((r.get("target_savepath") or ""), nm), 0) > 1:
@@ -1955,6 +2022,7 @@ def ai_analyze():
         "dup_episode": sum(1 for r in rows if r["status"] == "dup_episode"),
         "unmatched": sum(1 for r in rows if r["status"] == "unmatched" and not r.get("aux")),
         "aux": sum(1 for r in rows if r.get("aux")),
+        "dup_copy": sum(1 for r in rows if r.get("dup_copy")),
         "folder": sum(1 for r in rows if r["status"] == "folder"),
         "collision": sum(1 for r in rows if r.get("collision")),
         "extra": sum(1 for r in rows if r.get("is_extra")),

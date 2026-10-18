@@ -1798,7 +1798,9 @@
         aiFilteredRows() {
           const rows = (this.aiAnalysis && this.aiAnalysis.rows) || [];
           if (this.aiFilter === 'new') return this.aiSortRows(rows.filter(r => r.status === 'new'));
-          if (this.aiFilter === 'dup') return this.aiSortRows(rows.filter(r => r.status === 'dup_episode'));
+          if (this.aiFilter === 'dup') {
+            return this.aiSortRows(rows.filter(r => r.status === 'dup_episode' || r.status === 'dup_copy'));
+          }
           if (this.aiFilter === 'unmatched') {
             return this.aiSortRows(rows.filter(r => r.status === 'unmatched' || r.status === 'rule_error'));
           }
@@ -1808,7 +1810,9 @@
         aiFilterCount(key) {
           const rows = (this.aiAnalysis && this.aiAnalysis.rows) || [];
           if (key === 'new') return rows.filter(r => r.status === 'new').length;
-          if (key === 'dup') return rows.filter(r => r.status === 'dup_episode').length;
+          if (key === 'dup') {
+            return rows.filter(r => r.status === 'dup_episode' || r.status === 'dup_copy').length;
+          }
           if (key === 'unmatched') {
             return rows.filter(r => r.status === 'unmatched' || r.status === 'rule_error').length;
           }
