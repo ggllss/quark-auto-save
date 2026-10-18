@@ -127,6 +127,24 @@ def test_category_mapping():
     check("查不到返回空", tmdb.category_from_kind(None) == "")
 
 
+def test_pick_aliases():
+    print("【6e】别名挑选：优先英文/中文，剔掉冷门译名")
+    items = [
+        {"title": "Froni i shpatave", "country": "AL"},
+        {"title": "权力的游戏", "country": "CN"},
+        {"title": "Game of Thrones", "country": "US"},
+        {"title": "Le Trône de fer", "country": "FR"},
+        {"title": "冰与火之歌", "country": "CN"},
+        {"title": "Game of Thrones", "country": "GB"},
+    ]
+    picked = tmdb.pick_aliases(items, limit=4)
+    check("英文/中文优先", picked[:2] == ["权力的游戏", "Game of Thrones"], picked)
+    check("冷门译名排后面", picked.index("Froni i shpatave") > 1, picked)
+    check("去重", picked.count("Game of Thrones") == 1, picked)
+    check("数量受 limit 限制", len(tmdb.pick_aliases(items, limit=2)) == 2)
+    check("空输入不报错", tmdb.pick_aliases([]) == [] and tmdb.pick_aliases(None) == [])
+
+
 def test_rule_skip_model():
     print("【6d】规则推荐：分数领先时不调模型")
     files = ["背着善宰跑.S01E01.mkv", "背着善宰跑.S01E02.mkv"]
@@ -824,6 +842,7 @@ def main():
     test_template_safety()
     test_rule_local(mr, presets, files)
     test_category_mapping()
+    test_pick_aliases()
     test_rule_skip_model()
     test_heuristic_rank()
     test_ai_paths(mr, presets, files)

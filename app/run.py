@@ -1110,11 +1110,13 @@ def ai_search():
                 intent["category"] = _cat
             # 只要英文或中文别名——TMDB 会返回一堆冰岛语/俄语译名，
             # 拿去搜网盘只会增加无效查询
-            _alts = [
-                a for a in tmdb.alternative_titles(_tmdb_key, intent["title"])
-                if a and a.lower() != intent["title"].lower()
-                and (re.fullmatch(r"[\x20-\x7E]+", a) or re.search(r"[\u4e00-\u9fff]", a))
-            ][:6]
+            _raw_alts = tmdb.alternative_titles(_tmdb_key, intent["title"])
+            _alts = tmdb.pick_aliases(_raw_alts, limit=6)
+            # 原始名（英文原名）最有用：英文标题的分享只认它
+            _orig = (_kind or {}).get("original_name") or ""
+            if _orig and _orig.lower() != intent["title"].lower():
+                _alts = [_orig] + [a for a in _alts if a.lower() != _orig.lower()]
+            _alts = [a for a in _alts if a.lower() != intent["title"].lower()][:6]
             if _alts:
                 intent["aliases"] = _alts
                 _q = list(intent.get("queries") or [])

@@ -390,13 +390,42 @@ def alternative_titles(api_key, name):
         try:
             data = _request(api_key, "/3/tv/%s/alternative_titles" % tv_id)
             return [
-                (t.get("title") or "").strip()
+                {"title": (t.get("title") or "").strip(), "country": (t.get("iso_3166_1") or "")}
                 for t in (data.get("results") or [])
                 if (t.get("title") or "").strip()
             ]
         except Exception:  # noqa: BLE001
             return []
     return []
+
+
+# 优先采用的别名地区：英文（美/英）+ 中文（大陆/台/港/新）
+PREFERRED_ALIAS_COUNTRIES = ("US", "GB", "CN", "TW", "HK", "SG")
+
+
+def pick_aliases(items, limit=6):
+    """
+    从 TMDB 别名里挑出有用的：优先英文/中文，其余按原顺序补足。
+
+    不筛的话会拿到阿尔巴尼亚语、西班牙语这类译名，
+    拿去搜网盘纯属浪费一次 4 秒的查询。
+    """
+    preferred, others = [], []
+    for item in items or []:
+        title = (item.get("title") or "").strip()
+        if not title:
+            continue
+        if item.get("country") in PREFERRED_ALIAS_COUNTRIES:
+            preferred.append(title)
+        else:
+            others.append(title)
+    out = []
+    for title in preferred + others:
+        if title not in out:
+            out.append(title)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _norm_title(text):
@@ -426,6 +455,9 @@ def media_kind(api_key, name):
             "kind": "tv",
             "genres": [g.get("id") for g in (data.get("genres") or []) if g.get("id")],
             "name": data.get("name") or "",
+            # 原始名（通常是英文原名）：alternative_titles 不含它，
+            # 但英文名分享（Game.of.Thrones）必须靠它才匹配得上
+            "original_name": data.get("original_name") or "",
         }
 
     movie = None
@@ -447,7 +479,12 @@ def media_kind(api_key, name):
                 genres = [g.get("id") for g in (detail.get("genres") or []) if g.get("id")]
             except Exception:  # noqa: BLE001
                 pass
-        movie = {"kind": "movie", "genres": genres, "name": top.get("title") or ""}
+        movie = {
+            "kind": "movie",
+            "genres": genres,
+            "name": top.get("title") or "",
+            "original_name": top.get("original_title") or "",
+        }
 
     # 精确同名的优先
     if movie and _norm_title(movie["name"]) == target and not (
