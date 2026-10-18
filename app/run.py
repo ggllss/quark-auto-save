@@ -452,12 +452,34 @@ def _air_date(name, dir_path=""):
     return "%s-%02d-%02d" % (year, month, day)
 
 
+def _episode_from_name(name):
+    """从文件名里认出集号/期号（09期 / 第9期 / S01E09 / E09）"""
+    text = _strip_media_ext(str(name or ""))
+    for pat in (
+        r"第\s*(\d{1,3})\s*[期集话]",
+        r"^\s*(\d{1,3})\s*[期集]",
+        r"[Ss]\d{1,2}[Ee](\d{1,3})",
+        r"(?:^|[. _\-])[Ee](\d{1,3})(?!\d)",
+    ):
+        m = re.search(pat, text)
+        if m:
+            return int(m.group(1))
+    return None
+
+
 def _season_of_path(dir_path):
-    """从目录路径里逐段找季号（整条路径直接解析会串味）"""
-    for piece in str(dir_path or "").split("/"):
+    """
+    从目录路径里找季号：从最内层往外找（越深越准）。
+
+    「王牌对王牌1-9合集/1-8季/[王P对W牌7][2022]/」这种路径，
+    最外层写的是 1-9 区间，只有最内层才是真的第 7 季。
+    """
+    for piece in reversed([p for p in str(dir_path or "").split("/") if p.strip()]):
         piece = piece.strip()
-        if not piece or re.fullmatch(r"[\d\s._-]+", piece):
-            continue
+        if re.fullmatch(r"[\d\s._-]+", piece):
+            continue          # 纯数字（年份/序号）
+        if re.search(r"\d\s*[-~到]\s*\d", piece):
+            continue          # 「1-9」「1~8」这种区间不是季号
         season = _season_of_text(piece)
         if season:
             return season
@@ -1878,6 +1900,15 @@ def ai_analyze():
             row_season = None
             row_target = savepath_norm
             row_dir = ""
+            # 文件名里已经带集号/期号的，交给规则处理，别被日期兜底抢走
+            # （$TV_MAGIC 的 pattern 是空的，「规则没匹配」这个判断对它是恒真的）
+            _has_ep_info = bool(re.search(
+                r"[Ss]\d{1,2}[Ee]\d{1,3}"
+                r"|(?:^|[. _\-])[Ee]\d{1,3}(?!\d)"
+                r"|第\s*\d{1,3}\s*[期集]"
+                r"|^\s*\d{1,3}\s*[期集]",       # 「09期.mp4」这种
+                name,
+            ))
             if is_extra:
                 # 花絮素材要同时比对 S00 和正片目录：
                 # 用户历史库里这类素材多半还留在 S04，不能因为换了归档位置就重下一遍。
@@ -1969,7 +2000,8 @@ def ai_analyze():
             elif is_aux:
                 in_rule = False          # 辅助文件不套正片规则
                 new_name = name
-            elif (not is_extra and not is_movie
+            elif (not is_extra and not is_movie and not _has_ep_info
+                  and _air_date(name, f.get("dir_path"))     # 真能算出日期才走兜底
                   and not (rule_pattern and rule_ok and re.search(rule_pattern, name))):
                 # 规则匹配不上时，若文件名是日期（12.08.mp4 / 20250830.xxx.mp4），
                 # 用「剧名.播出日期」命名——Emby 会按播出日期匹配集数，
@@ -1983,14 +2015,27 @@ def ai_analyze():
                         except Exception:  # noqa: BLE001
                             _ep = None
                     _ext2 = os.path.splitext(name)[1]
+                    # 剧集要带 Sxx（S01E05 才是 Emby 认的写法），综艺按用户模板不带
+                    _sw = row.get("season_label") or ""
+                    _is_tv = category in ("电视剧", "动漫") and _sw
                     if _ep:
-                        new_name = "%s.E%02d.%s%s" % (taskname, _ep, _air, _ext2)
+                        if _is_tv:
+                            new_name = "%s.%sE%02d.%s%s" % (taskname, _sw, _ep, _air, _ext2)
+                        else:
+                            new_name = "%s.E%02d.%s%s" % (taskname, _ep, _air, _ext2)
                         row["tmdb_episode"] = _ep
                     else:
-                        new_name = "%s.%s%s" % (taskname, _air, _ext2)
+                        if _is_tv:
+                            new_name = "%s.%s.%s%s" % (taskname, _sw, _air, _ext2)
+                        else:
+                            new_name = "%s.%s%s" % (taskname, _air, _ext2)
                     in_rule = True
                     row["date_named"] = True
                     row["air_date"] = _air
+                else:
+                    # 既匹配不上规则、又没日期 → 保留原名（否则 new_name 未定义会 500）
+                    in_rule = False
+                    new_name = name
             elif is_movie:
                 in_rule = True
                 new_name = row.get("_movie_name") or name
@@ -2016,8 +2061,24 @@ def ai_analyze():
                     _tpl = _tpl.replace("{SXX}", _season_label)
                 # sort_file_list 的 {II} 是「全部文件的全局序号」，
                 # 多季分享里会变成 E118 这种；只有拿不到真实集号时才用它
+                # 规则不匹配、但文件名里有集号（如「09期.mp4」）→ 按集号命名，
+                # 否则用户只会看到「不匹配规则」、一个 E 号都没有
+                if not in_rule:
+                    _ep2 = _episode_from_name(name)
+                    if _ep2:
+                        _ext3 = os.path.splitext(name)[1]
+                        _sw2 = row.get("season_label") or ""
+                        if category in ("电视剧", "动漫") and _sw2:
+                            new_name = "%s.%sE%02d%s" % (taskname, _sw2, _ep2, _ext3)
+                        else:
+                            new_name = "%s.E%02d.第%d期%s" % (taskname, _ep2, _ep2, _ext3)
+                        in_rule = True
+                        row["ep_from_name"] = _ep2
+                        row["status_text"] = "可新增（按集号命名）"
                 _has_seq = bool(re.search(r"\{I+\}", rule_replace or ""))
-                if _has_seq and _num is None:
+                if row.get("ep_from_name"):
+                    pass          # 名字已经按集号算好了，别再覆盖
+                elif _has_seq and _num is None:
                     new_name = resolved_names.get(name) or (
                         mr.sub(rule_pattern, _tpl, name) if rule_ok else name
                     )
@@ -2138,6 +2199,11 @@ def ai_analyze():
             r["default_selected"] = False
             if r.get("status") in ("new", "dup_episode", "unmatched"):
                 r["status_text"] = r["status_text"] + "（与其他文件重名）"
+
+    # 按集号兜底命名的行，状态文案单独标出来（透明一些）
+    for _r in rows:
+        if _r.get("ep_from_name") and _r.get("status") == "new":
+            _r["status_text"] = "可新增（按集号命名）"
 
     # 海报/nfo 这类辅助文件单独标一下，别混在「不匹配规则」里
     for _r in rows:
