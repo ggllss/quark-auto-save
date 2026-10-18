@@ -1163,7 +1163,11 @@ def ai_search():
                         pool.append(item)
         return pool
 
-    cache_key = "|".join([keyword.lower(), intent.get("title") or ""])
+    # 缓存键要带上检索词：别名策略一变（比如补了英文原名），
+    # 旧缓存就会一直返回「只有 2 条」的老结果
+    cache_key = "|".join(
+        [keyword.lower(), intent.get("title") or "", ",".join(sorted(queries))]
+    )
     cached = _search_cache_get(cache_key)
     retried = False
     if cached is not None:

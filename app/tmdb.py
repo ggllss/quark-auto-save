@@ -413,7 +413,9 @@ def pick_aliases(items, limit=6):
     preferred, others = [], []
     for item in items or []:
         title = (item.get("title") or "").strip()
-        if not title:
+        # 两个字符的别名（BB、GoT 之外的缩写）太松：
+        # 「BB」会把「BB酱」这种无关短剧也匹配进来，检索也搜不出东西
+        if len(title) < 3:
             continue
         if item.get("country") in PREFERRED_ALIAS_COUNTRIES:
             preferred.append(title)

@@ -637,7 +637,7 @@
                   </div>
                 </div>
                 <small class="text-muted d-block mt-2">
-                  AI 负责理解剧名、从候选链接里挑最匹配的；
+                  剧名解析和候选排序用<b>本地规则 + TMDB</b>（含中英别名），必要时才调模型；
                   <b>哪些集可更新由确定性比对得出</b>（分享文件 × 目标目录已有文件），不靠模型猜。
                 </small>
                 <!-- 公共搜索源没收录的分享（比如别人私发的链接）用这里 -->
@@ -681,8 +681,13 @@
                 剧名「{{ aiResult.intent.title }}」
                 <span v-if="aiResult.intent.season">· 第 {{ aiResult.intent.season }} 季</span>
                 · 检索词 {{ (aiResult.intent.queries || []).join(' / ') }}
-                <span class="badge" :class="aiResult.ai_used ? 'badge-info' : 'badge-secondary'">
-                  {{ aiResult.ai_used ? 'AI 解析' : '本地解析' }}
+                <span v-if="(aiResult.intent.aliases || []).length" class="text-muted">
+                  · 别名 {{ (aiResult.intent.aliases || []).slice(0, 3).join(' / ') }}
+                </span>
+                <span class="badge"
+                      :class="aiResult.intent.source === 'ai' ? 'badge-info' : 'badge-secondary'">
+                  {{ aiResult.intent.source === 'ai' ? 'AI 解析'
+                     : (aiResult.intent.source === 'local+tmdb' ? '本地+TMDB' : '本地解析') }}
                 </span>
                 · 候选 {{ aiResult.candidates.length }} 条
               </div>
