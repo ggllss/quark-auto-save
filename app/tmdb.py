@@ -386,7 +386,11 @@ def alternative_titles(api_key, name):
     if not api_key or not name:
         return []
     tv_id = resolve_show(api_key, name)
-    if tv_id:
+    if not tv_id:
+        return []
+    # TMDB 偶发 5xx/超时；一次失败就返回空会让英文标题的分享全被过滤掉，
+    # 所以重试一次再放弃。
+    for attempt in range(2):
         try:
             data = _request(api_key, "/3/tv/%s/alternative_titles" % tv_id)
             return [
@@ -395,7 +399,8 @@ def alternative_titles(api_key, name):
                 if (t.get("title") or "").strip()
             ]
         except Exception:  # noqa: BLE001
-            return []
+            if attempt == 1:
+                return []
     return []
 
 

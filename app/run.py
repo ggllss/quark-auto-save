@@ -1142,6 +1142,25 @@ def ai_search():
     )
     if _need_ai:
         intent = ai.parse_intent(keyword, client)
+    # TMDB 别名没拿到时，让模型补一次（罕见）：中文片名拿不到英文别名，
+    # 英文标题的分享就会被相关性过滤整批挡掉，用户看到「0 条」。
+    elif not intent.get("aliases") and client is not None and getattr(client, "ready", False):
+        try:
+            _ai_intent = ai.parse_intent(keyword, client)
+            _extra = [
+                a for a in (_ai_intent.get("aliases") or [])
+                if a and len(a) >= 3 and a.lower() != (intent.get("title") or "").lower()
+            ]
+            if _extra:
+                intent["aliases"] = _extra[:4]
+                _q2 = list(intent.get("queries") or [])
+                for _a in _extra[:2]:
+                    if _a not in _q2:
+                        _q2.append(_a)
+                intent["queries"] = _q2[:5]
+                intent["source"] = "local+tmdb+ai"
+        except Exception:  # noqa: BLE001
+            pass
     queries = [(q or "").lower() for q in (intent.get("queries") or [])[:3] if q]
 
     def gather():
