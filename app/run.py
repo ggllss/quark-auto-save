@@ -359,6 +359,7 @@ _AUX_EXTS = (
     ".nfo", ".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup",
     ".txt", ".md5", ".sfv", ".torrent",
     ".azw3", ".azw", ".epub", ".mobi", ".pdf", ".cbz", ".cbr",
+    ".docx", ".doc", ".xlsx", ".pptx", ".exe", ".bat", ".url", ".lnk",
 )
 
 
@@ -1498,6 +1499,16 @@ def ai_analyze():
     share_seasons = set() if is_movie else _seasons_in_share(share_list)
     share_season, share_season_hits = _season_from_share(share_list)
     season_note = ""
+    # 剧集：文件名里有 E05 这种集号但没有季标记时按第 1 季处理
+    # （Emby 对单季剧同样期望 Season 01 目录；综艺不套这条，季号来自库里）
+    if (not share_season and not is_movie and category in ("电视剧", "动漫")
+            and not re.search(r"[Ss]\d{1,2}", savepath.rstrip("/").rsplit("/", 1)[-1] or "")):
+        _has_ep = any(re.search(r"(?:^|[. _-])[Ee]\d{1,3}", (f.get("file_name") or ""))
+                      for f in share_list if not f.get("dir"))
+        if _has_ep:
+            share_season = 1
+            share_seasons = {1}
+
     multi_season = len(share_seasons) > 1
     if multi_season:
         # 一个链接整季打包：每季各进各的 Sxx，不能只套一个
@@ -1897,6 +1908,10 @@ def ai_analyze():
             ):
                 row["unresolved"] = True
                 row.update({"status": "rule_error", "status_text": "命名变量未解析"})
+            elif rule_ok and re.search(r"[Ss]\d\d[Ee](?!\d)", new_name or ""):
+                # 集号解析出空值（如「S01E.mkv」），说明源文件名里没有集号
+                row["unresolved"] = True
+                row.update({"status": "rule_error", "status_text": "集号解析失败"})
             row["exists"] = exists_orig or exists_new
             if not rule_ok:
                 row.update({"status": "rule_error", "status_text": "规则无效"})
