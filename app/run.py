@@ -297,7 +297,7 @@ def _strip_media_ext(text):
     return text
 
 
-def _season_of_text(text):
+def _season_of_text(text, strict=False):
     """从一段文字里认出季号，认不出返回 None"""
     text = _strip_media_ext(str(text or "").strip())
     if not text:
@@ -314,6 +314,10 @@ def _season_of_text(text):
             return season
     # 「第N期/第N集」是综艺的期号，不能当季号
     if _PERIOD_RE.search(text):
+        return None
+    if strict:
+        # 严格模式只认显式的 Sxx / 第N季 / Season N，
+        # 不走下面的裸数字兜底（「我的三体之章北海传_06.mkv」的 06 是集号）
         return None
     # 分享常用「[王牌对王牌4][2019]」这种带括号的写法：
     # 先把括号里的 4 位年份摘掉，再剥掉括号本身，才认得出季号 4
@@ -377,8 +381,10 @@ _MOVIE_JUNK_RE = re.compile(
     # XIONGMAO3 里的「MA」吃掉、`dv` 会吃掉「DVDRip」以外的东西，
     # 结果片名被改成「XIONG O3」这种鬼样子。
     r"(?:\b(?:2160p|1080p|720p|480p|4k|uhd|blu-?ray|bluray|remux|web-?dl|webrip|hdtv|"
+    r"bd1080p|bd720p|hd1080p|fhd1080p|"
     r"x265|x264|h265|h264|hevc|avc|10bit|8bit|hdr10|hdr|dolby|dovi|dv|"
-    r"dts-?hd|dts|truehd|atmos|aac2|aac|ac3|eac3|flac|ma|5\.1|7\.1|2\.0|60fps|hfr|"
+    r"dts-?hd|dts|truehd|atmos|aac2|aac|ac3|eac3|flac|ma|5\.1|7\.1|2\.0|"
+    r"5 1|7 1|2 0|60fps|hfr|"   # 点号已被替换成空格，这里补一套空格写法
     r"proper|repack|extended|hq|ddp|dd5|dd7|opus|lpcm|sdr|uhdrip|bdrip|hdrip)\b"
     r"|国英双语|国语|英语|双语|内封|简英|中字|字幕|蓝光|原盘|合集|臻彩|高码率|高码|"
     r"无水印|纯净版|外挂|简中|繁中|中英|内嵌|硬字幕|国粤|粤语|普通话)",
@@ -410,6 +416,8 @@ def _movie_title_year(text):
     base = re.sub(r"[(\[【（［][^)\]】）］]*[)\]】）］]", " ", base)
     base = re.sub(r"[\s.\-_]+", " ", base).strip(" -_")
     base = _MOVIE_JUNK_RE.sub(" ", base)
+    # 片名里不该留 S01E06 这种剧集标记
+    base = re.sub(r"[Ss]\d{1,2}\s*[Ee]\d{1,3}", " ", base)
     base = re.sub(r"\s+", " ", base)
     # 去掉尾部残留的连接符（「流浪地球2 & 」这种）
     base = base.strip(" -_&+、,，·")
@@ -493,12 +501,18 @@ def _seasons_in_share(items):
     """分享里出现了哪些季（一个链接可能整季打包，S01…S05 各一个目录）"""
     seasons = set()
     for it in items or []:
-        for text in (it.get("dir_path") or "", it.get("file_name") or ""):
+        # 目录名用宽松模式（要能认 [王牌对王牌4][2019] 这种），
+        # 文件名用严格模式——「我的三体之章北海传_06.mkv」的 06 是集号，
+        # 宽松模式会把它当成第 6 季，凭空多出 9 个季
+        for is_file, text in (
+            (False, it.get("dir_path") or ""),
+            (True, it.get("file_name") or ""),
+        ):
             text = _strip_media_ext(str(text or ""))
             for piece in [text] + [x for x in text.split("/") if x]:
                 if re.fullmatch(r"[\d\s._-]+", piece.strip() or "x"):
                     continue
-                season = _season_of_text(piece)
+                season = _season_of_text(piece, strict=is_file)
                 if season:
                     seasons.add(season)
     return seasons
@@ -1690,8 +1704,16 @@ def ai_analyze():
     # （Emby 对单季剧同样期望 Season 01 目录；综艺不套这条，季号来自库里）
     if (not share_season and not is_movie and category in ("电视剧", "动漫")
             and not re.search(r"[Ss]\d{1,2}", savepath.rstrip("/").rsplit("/", 1)[-1] or "")):
-        _has_ep = any(re.search(r"(?:^|[. _-])[Ee]\d{1,3}", (f.get("file_name") or ""))
-                      for f in share_list if not f.get("dir"))
+        # 「01.mp4」「14.mp4」这种纯数字也是集号，不能只认 E05
+        _has_ep = any(
+            re.search(
+                r"(?:^|[. _\-])[Ee]\d{1,3}"
+                r"|^\s*\d{1,3}\s*(?:\.\w+)?$"
+                r"|第\s*\d{1,3}\s*[集期]",
+                (f.get("file_name") or ""),
+            )
+            for f in share_list if not f.get("dir")
+        )
         if _has_ep:
             share_season = 1
             share_seasons = {1}
@@ -2049,7 +2071,7 @@ def ai_analyze():
                 cmp_se = []
             else:
                 # 一个链接整季打包时，按文件自己所属的季分别入库
-                row_season = _season_of_path(f.get("dir_path")) or _season_of_text(name)
+                row_season = _season_of_path(f.get("dir_path")) or _season_of_text(name, strict=True)
                 # 不在任何季目录里的（分享根目录混着的几期）：
                 # 用播出日期问 TMDB 该进第几季，避免落到剧名根目录下
                 if not row_season and not is_movie and tmdb_key:
@@ -2193,6 +2215,16 @@ def ai_analyze():
             exists_orig = bool(mr.is_exists(name, cmp_names))
             exists_new = bool(mr.is_exists(new_name, cmp_names))
             row["new_name"] = new_name or name
+            # 名字里带了 Sxx、目标目录却没有 Sxx 子目录 → 补上，
+            # 否则文件直接躺在剧名根目录下，Emby 认不出来
+            _m_sw = re.search(r"[Ss](\d{2})[Ee]\d", row["new_name"] or "")
+            if _m_sw and not row_dir and not is_movie and not is_extra:
+                _sw_n = int(_m_sw.group(1))
+                _cur_tp = (row.get("target_savepath") or "").rstrip("/")
+                _tail2 = _cur_tp.rsplit("/", 1)[-1] or ""
+                if not re.fullmatch(r"[Ss]\d{1,2}", _tail2):
+                    row["target_savepath"] = "%s/S%02d" % (_cur_tp, _sw_n)
+                    row["target_dir"] = "S%02d" % _sw_n
             row["in_rule"] = in_rule
             if rule_ok and re.search(
                 r"\{(TASKNAME|SXX|S|E|I+|EXT|PART|DATE|YEAR|CHINESE|VER)\}", new_name or ""
