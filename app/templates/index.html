@@ -1573,6 +1573,9 @@
               const res = response.data;
               if (!res.success) { this.aiError = res.message || '搜索失败'; return; }
               this.aiResult = res.data;
+        if (res.data && res.data.movie_mode) {
+          this.aiForm.season = null;   // 电影没有季
+        }
               if (!res.data.candidates.length) {
                 // 后端会区分「没配搜索源」和「搜索源限流/超时」两种情况
                 this.aiError = res.data.hint || '没有搜到候选链接，请换个关键词再试。';

@@ -1681,6 +1681,10 @@ def ai_analyze():
     # ①b 季号：优先信分享内容自带的季号
     share_seasons = set() if is_movie else _seasons_in_share(share_list)
     share_season, share_season_hits = _season_from_share(share_list)
+    if is_movie:
+        # 电影没有季。片名里的数字（XIONGMAO3 的 3）会被 split_season
+        # 当成季号，导致「功夫熊猫3 → S03」「/电影/功夫熊猫/S02」这种荒唐结果。
+        share_season, share_season_hits, share_seasons = None, [], set()
     season_note = ""
     # 剧集：文件名里有 E05 这种集号但没有季标记时按第 1 季处理
     # （Emby 对单季剧同样期望 Season 01 目录；综艺不套这条，季号来自库里）
@@ -2012,12 +2016,16 @@ def ai_analyze():
                 if not _year:
                     _year = _fy
                 _title = _title or taskname
-                # 目录名是全大写拼音缩写（XIONGMAO3）又没有年份时，用剧名更靠谱
+                # 目录名是全大写拼音缩写（XIONGMAO3）又没有年份时，用剧名更靠谱；
+                # 缩写末尾的数字是续集序号（XIONGMAO3 的 3），要补到剧名后面
                 if (_title and not _year
                         and re.fullmatch(r"[A-Z0-9._\-]{3,}", _title)
                         and taskname
                         and not re.fullmatch(r"[A-Z0-9._\-]{3,}", taskname)):
+                    _tail_num = re.search(r"(\d{1,2})$", _title)
                     _title = taskname
+                    if _tail_num and not taskname.rstrip().endswith(_tail_num.group(1)):
+                        _title = "%s%s" % (taskname, _tail_num.group(1))
                 _label = ("%s (%s)" % (_title, _year)) if _year else _title
                 _ver = _movie_version(name) if movie_counts.get((_title, _year), 0) > 1 else ""
                 _ext = os.path.splitext(name)[1]
