@@ -642,10 +642,11 @@ async function testMobileInteraction() {
 
   // 长文件名/长路径缩略
   check('文件名用单行省略样式', html.includes('ai-name') && html.includes('ai-name-open'));
-  check('路径只显示最后两层',
-    ctx.aiShortPath('权力的游戏合集 4K蓝光 HDR 杜比视界/Game.of.Thrones.S04/Game.of.Thrones.S04E08.mkv')
-      === '…/Game.of.Thrones.S04/Game.of.Thrones.S04E08.mkv',
-    ctx.aiShortPath('权力的游戏合集 4K蓝光 HDR 杜比视界/Game.of.Thrones.S04/Game.of.Thrones.S04E08.mkv'));
+  check('路径保留最后三层（不要缩太狠）',
+    ctx.aiShortPath('权力的游戏合集/Game.of.Thrones.S04/2160p/Game.of.Thrones.S04E08.mkv')
+      === '…/Game.of.Thrones.S04/2160p/Game.of.Thrones.S04E08.mkv',
+    ctx.aiShortPath('权力的游戏合集/Game.of.Thrones.S04/2160p/Game.of.Thrones.S04E08.mkv'));
+  check('路径与文件名同宽（独占一行）', html.includes('.ai-path') && html.includes('display: block'));
   check('短路径原样显示', ctx.aiShortPath('S04/') === 'S04', ctx.aiShortPath('S04/'));
   check('空路径不报错', ctx.aiShortPath('') === '' && ctx.aiShortPath(null) === '');
   ctx.aiExpanded = {};

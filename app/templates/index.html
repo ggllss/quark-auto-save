@@ -39,13 +39,16 @@
       white-space: normal;
       word-break: break-all;
     }
+    /* 路径独占一行、和文件名同宽（别缩成小徽章，那样看不清是哪个目录） */
     .ai-path {
-      display: inline-block;
-      max-width: 46%;
+      display: block;
+      max-width: 100%;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      vertical-align: bottom;
+      font-size: 11px;
+      line-height: 1.4;
+      color: #6c757d;
     }
 
     /* 分析结果滚动到顶部时，避开 sticky 的顶部导航 */
@@ -1027,8 +1030,7 @@
                         </button>
                       </div>
                       <div class="small text-muted">
-                        <span v-if="row.dir_path" class="badge badge-light mr-1 ai-path"
-                              :title="row.dir_path">{{ aiShortPath(row.dir_path) }}</span>
+                        <span v-if="row.dir_path" class="ai-path" :title="row.dir_path">{{ aiShortPath(row.dir_path) }}</span>
                         <span class="ai-name" :class="{'ai-name-open': aiExpanded[row.fid || row.file_name]}"
                               :title="row.file_name" @click="aiToggleName(row)">{{ row.file_name }}</span>
                       </div>
@@ -1077,8 +1079,7 @@
                               type="button" :disabled="aiDeleting" @click="aiDeleteRow(row)">删除</button>
                     </td>
                     <td>
-                      <span v-if="row.dir_path" class="badge badge-light mr-1 ai-path"
-                            :title="row.dir_path">{{ aiShortPath(row.dir_path) }}</span>
+                      <span v-if="row.dir_path" class="ai-path" :title="row.dir_path">{{ aiShortPath(row.dir_path) }}</span>
                       <small class="ai-name" :class="{'ai-name-open': aiExpanded[row.fid || row.file_name]}"
                              :title="row.file_name" @click="aiToggleName(row)">{{ row.file_name }}</small>
                       <small v-if="row.size" class="text-muted ml-1">{{ row.size | size }}</small>
@@ -1811,8 +1812,8 @@
         // 长路径只显示最后两层，前面用 … 省略
         aiShortPath(path) {
           const parts = String(path || '').split('/').filter(Boolean);
-          if (parts.length <= 2) return parts.join('/');
-          return '…/' + parts.slice(-2).join('/');
+          if (parts.length <= 3) return parts.join('/');
+          return '…/' + parts.slice(-3).join('/');
         },
         // 长文件名：点一下展开/收起
         aiToggleName(row) {
