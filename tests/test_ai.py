@@ -146,6 +146,23 @@ def test_movie_junk_words():
     check("年份能取出", run._movie_title_year("虎虎虎.1970.BD中英双字")[1] == "1970")
 
 
+def test_movie_year_lookup():
+    print("【6g】电影年份：分享里没有就问 TMDB")
+    import tmdb
+    key = "d7bb29d7931a5d320f7f5e835eb78eaf"
+    cases = {"功夫熊猫3": "2016", "流浪地球": "2019", "虎虎虎": "1970"}
+    got = {t: tmdb.movie_year(key, t) for t in cases}
+    check("功夫熊猫3 → 2016", got["功夫熊猫3"] == "2016", got)
+    check("流浪地球 → 2019", got["流浪地球"] == "2019", got)
+    check("虎虎虎 → 1970", got["虎虎虎"] == "1970", got)
+    check("空输入返回空", tmdb.movie_year(key, "") == "")
+    check(
+        "查不到的返回空串而不是报错",
+        tmdb.movie_year(key, "zzzz_不存在的片名_zzzz") == "",
+        tmdb.movie_year(key, "zzzz_不存在的片名_zzzz"),
+    )
+
+
 def test_pick_aliases():
     print("【6e】别名挑选：优先英文/中文，剔掉冷门译名")
     items = [
@@ -862,6 +879,7 @@ def main():
     test_rule_local(mr, presets, files)
     test_category_mapping()
     test_movie_junk_words()
+    test_movie_year_lookup()
     test_pick_aliases()
     test_rule_skip_model()
     test_heuristic_rank()

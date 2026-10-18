@@ -2026,6 +2026,15 @@ def ai_analyze():
                     _title = taskname
                     if _tail_num and not taskname.rstrip().endswith(_tail_num.group(1)):
                         _title = "%s%s" % (taskname, _tail_num.group(1))
+                # 分享里没有年份时问 TMDB（功夫熊猫3 → 2016）；
+                # 查不到就保持无年份，不瞎猜
+                if not _year and _title and tmdb_key:
+                    try:
+                        _year = tmdb.movie_year(tmdb_key, _title) or ""
+                        if _year:
+                            row["year_from_tmdb"] = True
+                    except Exception:  # noqa: BLE001
+                        _year = ""
                 _label = ("%s (%s)" % (_title, _year)) if _year else _title
                 _ver = _movie_version(name) if movie_counts.get((_title, _year), 0) > 1 else ""
                 _ext = os.path.splitext(name)[1]

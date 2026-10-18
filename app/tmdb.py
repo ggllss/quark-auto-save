@@ -517,3 +517,47 @@ def category_from_kind(info):
     if 99 in genres:                 # Documentary → 纪录片
         return "纪录片"
     return "电视剧"
+
+
+def movie_year(api_key, title):
+    """
+    按片名查上映年份（分享里的文件名常常没有年份）。
+
+    「功夫熊猫3」→ 2016，「流浪地球」→ 2019。查不到返回空串。
+    """
+    if not api_key or not title:
+        return ""
+
+    def go():
+        data = _request(api_key, "/3/search/movie", {"query": title})
+        return data.get("results") or []
+
+    try:
+        results = _cached(("search_movie", title), go)
+    except Exception:  # noqa: BLE001
+        return ""
+    if not results:
+        return ""
+    target = _norm_title(title)
+    # 先找同名（或名字包含关系）的，找不到再用第一条
+    pick = None
+    for item in results[:8]:
+        name = item.get("title") or item.get("original_title") or ""
+        if _norm_title(name) == target:
+            pick = item
+            break
+        if not pick and target and target in _norm_title(name):
+            pick = item
+    pick = pick or results[0]
+    release = pick.get("release_date") or ""
+    if release[:4].isdigit():
+        return release[:4]
+    movie_id = pick.get("id")
+    if not movie_id:
+        return ""
+    try:
+        detail = _request(api_key, "/3/movie/%s" % movie_id)
+    except Exception:  # noqa: BLE001
+        return ""
+    release = detail.get("release_date") or ""
+    return release[:4] if release[:4].isdigit() else ""
