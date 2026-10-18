@@ -1677,6 +1677,7 @@ def ai_analyze():
     # 电影：片名(年份) 建子文件夹；同一部片有多个版本时文件名带版本后缀
     movie_root = savepath_norm
     movie_counts = {}
+    _folder_titles = {}
     if is_movie:
         _last = movie_root.rstrip("/").rsplit("/", 1)[-1] or ""
         if _last and _last == (taskname or "").strip():
@@ -1688,6 +1689,10 @@ def ai_analyze():
             _s2 = _d.rsplit("/", 1)[-1].strip() if _d else ""
             _t, _y = _movie_title_year(_s2) if _s2 else ("", "")
             _ft2, _fy2 = _movie_title_year(_f.get("file_name") or "")
+            # 同一个目录里出现多个不同片名 → 这是「多部电影合辑」，
+            # 不能拿目录名当片名（会把《深入敌后3》也命名成「深入敌后系列」）
+            if _d and _ft2:
+                _folder_titles.setdefault(_d, set()).add(_ft2)
             _t = _t or _ft2
             _y = _y or _fy2
             if _t:
@@ -1796,6 +1801,9 @@ def ai_analyze():
                 _seg = _dir.rsplit("/", 1)[-1].strip() if _dir else ""
                 _title, _year = _movie_title_year(_seg) if _seg else ("", "")
                 _ft, _fy = _movie_title_year(name)
+                # 该目录里有多部不同的电影 → 用文件自己的片名
+                if _dir and len(_folder_titles.get(_dir) or ()) > 1 and _ft:
+                    _title, _year = _ft, (_fy or _year)
                 if not _title:
                     _title = _ft
                 if not _year:
