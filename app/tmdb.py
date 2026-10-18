@@ -375,3 +375,101 @@ def episode_for_date(api_key, name, season, date):
             number = ep.get("number")      # season_episodes 用的是 number
             return number if isinstance(number, int) else None
     return None
+
+
+def alternative_titles(api_key, name):
+    """
+    剧名/片名的别名（含中英文），用来替代模型做「中英互译」。
+
+    搜「The Knockout」能带出「狂飙」，搜「绝命毒师」能带出「Breaking Bad」。
+    """
+    if not api_key or not name:
+        return []
+    tv_id = resolve_show(api_key, name)
+    if tv_id:
+        try:
+            data = _request(api_key, "/3/tv/%s/alternative_titles" % tv_id)
+            return [
+                (t.get("title") or "").strip()
+                for t in (data.get("results") or [])
+                if (t.get("title") or "").strip()
+            ]
+        except Exception:  # noqa: BLE001
+            return []
+    return []
+
+
+def _norm_title(text):
+    return re.sub(r"[\s\W_]+", "", str(text or "")).lower()
+
+
+def media_kind(api_key, name):
+    """
+    判断是剧集还是电影，并带回类型（用来定「电视剧/电影/动漫/综艺/纪录片」）。
+
+    剧集和电影都查一遍：同名的两边都可能有（「流浪地球」既有电影也有衍生剧），
+    精确同名优先，其次保持剧集优先。
+    返回 {"kind": "tv"/"movie", "genres": [int], "name": str}，查不到返回 None。
+    """
+    if not api_key or not name:
+        return None
+    target = _norm_title(name)
+
+    tv = None
+    tv_id = resolve_show(api_key, name)
+    if tv_id:
+        try:
+            data = _request(api_key, "/3/tv/%s" % tv_id)
+        except Exception:  # noqa: BLE001
+            data = {}
+        tv = {
+            "kind": "tv",
+            "genres": [g.get("id") for g in (data.get("genres") or []) if g.get("id")],
+            "name": data.get("name") or "",
+        }
+
+    movie = None
+
+    def go():
+        data = _request(api_key, "/3/search/movie", {"query": name})
+        return data.get("results") or []
+
+    try:
+        results = _cached(("search_movie", name), go)
+    except Exception:  # noqa: BLE001
+        results = []
+    if results:
+        top = results[0]
+        genres = []
+        if top.get("id"):
+            try:
+                detail = _request(api_key, "/3/movie/%s" % top["id"])
+                genres = [g.get("id") for g in (detail.get("genres") or []) if g.get("id")]
+            except Exception:  # noqa: BLE001
+                pass
+        movie = {"kind": "movie", "genres": genres, "name": top.get("title") or ""}
+
+    # 精确同名的优先
+    if movie and _norm_title(movie["name"]) == target and not (
+        tv and _norm_title(tv["name"]) == target
+    ):
+        return movie
+    if tv:
+        return tv
+    return movie
+
+
+def category_from_kind(info):
+    """把 TMDB 的类型映射成媒体库分类"""
+    if not info:
+        return ""
+    genres = set(info.get("genres") or [])
+    if info.get("kind") == "movie":
+        return "电影"
+    if genres & {10764, 10767}:      # Reality / Talk → 综艺
+        return "综艺"
+    if 16 in genres:                 # Animation → 动漫
+        return "动漫"
+    if 99 in genres:                 # Documentary → 纪录片
+        return "纪录片"
+    return "电视剧"

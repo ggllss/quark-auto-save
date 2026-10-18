@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.join(ROOT, "app"))
 try:
     from quark_auto_save import MagicRename
     import ai
+    import tmdb
 except ImportError as exc:  # pragma: no cover
     print("缺少依赖：%s" % exc)
     print(
@@ -104,6 +105,37 @@ def test_rule_local(mr, presets, files):
     preview = res["candidates"][0]["preview"] if res["candidates"] else []
     check("候选带预览", len(preview) > 0)
     check("任务名注入生效", any("背着善宰跑" in p["to"] for p in preview), preview)
+
+
+def test_category_mapping():
+    print("【6c】TMDB 类型映射（替代模型判类型）")
+    check("电影 → 电影", tmdb.category_from_kind({"kind": "movie", "genres": []}) == "电影")
+    check(
+        "Reality → 综艺",
+        tmdb.category_from_kind({"kind": "tv", "genres": [10764]}) == "综艺",
+    )
+    check("Talk → 综艺", tmdb.category_from_kind({"kind": "tv", "genres": [10767]}) == "综艺")
+    check(
+        "Animation → 动漫",
+        tmdb.category_from_kind({"kind": "tv", "genres": [16]}) == "动漫",
+    )
+    check(
+        "Documentary → 纪录片",
+        tmdb.category_from_kind({"kind": "tv", "genres": [99]}) == "纪录片",
+    )
+    check("剧情 → 电视剧", tmdb.category_from_kind({"kind": "tv", "genres": [18]}) == "电视剧")
+    check("查不到返回空", tmdb.category_from_kind(None) == "")
+
+
+def test_rule_skip_model():
+    print("【6d】规则推荐：分数领先时不调模型")
+    files = ["背着善宰跑.S01E01.mkv", "背着善宰跑.S01E02.mkv"]
+    presets = {"$TV_MAGIC": {"pattern": "", "replace": "{TASKNAME}.{SXX}E{E}.{EXT}"}}
+    stub = StubClient('{"choice":0,"replace_template":"x","reason":"y"}')
+    res = ai.suggest_rename_rule("背着善宰跑", files, presets, None, stub)
+    check("没调模型", stub.calls == [], stub.calls)
+    check("来源标记为 local", res["source"] == "local", res["source"])
+    check("仍然给出可用模板", "{TASKNAME}" in (res["replace"] or ""), res["replace"])
 
 
 def test_heuristic_rank():
@@ -791,6 +823,8 @@ def main():
     test_json_extract()
     test_template_safety()
     test_rule_local(mr, presets, files)
+    test_category_mapping()
+    test_rule_skip_model()
     test_heuristic_rank()
     test_ai_paths(mr, presets, files)
     test_http_layer()

@@ -627,6 +627,19 @@ def suggest_rename_rule(taskname, filenames, presets, apply_rule, client=None):
     pool = safe or candidates
     best = max(pool, key=lambda c: c["score"])
 
+    # 最高分明显领先时不必问模型：代码打分已经足够确定。
+    # 只有前两名咬得紧（差 <10 分）才让模型裁决。
+    ranked_pool = sorted(pool, key=lambda c: c["score"], reverse=True)
+    gap = ranked_pool[0]["score"] - ranked_pool[1]["score"] if len(ranked_pool) > 1 else 999
+    if len(ranked_pool) <= 1 or gap >= 10:
+        return {
+            "pattern": best["pattern"],
+            "replace": best["replace"],
+            "reason": "%s（领先次选 %d 分，直接采纳）" % (best["reason"], gap),
+            "source": "local",
+            "candidates": candidates,
+        }
+
     # 让 AI 在（不撞名的）候选里挑一个（并可微调模板）
     if client is not None and client.ready and filenames:
         try:

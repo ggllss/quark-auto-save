@@ -1098,7 +1098,48 @@ def ai_search():
         return jsonify({"success": False, "message": "请输入剧集名称"})
 
     client = _ai_client()
-    intent = ai.parse_intent(keyword, client)
+    # ① 代码先算（瞬时）：拆季号、剥年份、生成检索词
+    intent = ai.parse_intent(keyword, None)
+    # ② 类型和中英别名交给 TMDB（一次查询、缓存 1 小时），比模型稳定
+    _tmdb_key = (config_data.get("tmdb") or {}).get("api_key") or ""
+    if _tmdb_key and intent.get("title"):
+        try:
+            _kind = tmdb.media_kind(_tmdb_key, intent["title"])
+            _cat = tmdb.category_from_kind(_kind)
+            if _cat:
+                intent["category"] = _cat
+            # 只要英文或中文别名——TMDB 会返回一堆冰岛语/俄语译名，
+            # 拿去搜网盘只会增加无效查询
+            _alts = [
+                a for a in tmdb.alternative_titles(_tmdb_key, intent["title"])
+                if a and a.lower() != intent["title"].lower()
+                and (re.fullmatch(r"[\x20-\x7E]+", a) or re.search(r"[\u4e00-\u9fff]", a))
+            ][:6]
+            if _alts:
+                intent["aliases"] = _alts
+                _q = list(intent.get("queries") or [])
+                for _a in _alts[:2]:
+                    if _a not in _q:
+                        _q.append(_a)
+                intent["queries"] = _q[:5]
+            if _cat or _alts:
+                intent["source"] = "local+tmdb"
+        except Exception:  # noqa: BLE001 - TMDB 不可用不影响搜索
+            pass
+    # ③ 只有这几种情况才让模型兜底（罕见）：
+    #    代码算不出标题 / TMDB 查不到类型 / 纯英文片名且 TMDB 没给中文别名
+    #    （最后一种正是模型的强项：The Knockout → 狂飙）
+    _need_ai = (
+        not intent.get("title")
+        or not intent.get("category")
+        or (
+            not intent.get("aliases")
+            and re.search(r"[A-Za-z]{3,}", intent.get("title") or "")
+            and not re.search(r"[\u4e00-\u9fff]", intent.get("title") or "")
+        )
+    )
+    if _need_ai:
+        intent = ai.parse_intent(keyword, client)
     queries = [(q or "").lower() for q in (intent.get("queries") or [])[:3] if q]
 
     def gather():
