@@ -1202,33 +1202,26 @@ def ai_search():
                         flags[item["shareurl"]] = None
             return flags
 
-        with ThreadPoolExecutor(max_workers=2) as outer:
-            fut_rank = outer.submit(ai.rank_links, intent, shortlist, client)
-            fut_alive = outer.submit(_check_alive)
-            try:
-                ranked = fut_rank.result() or shortlist
-            except Exception:  # noqa: BLE001 - AI 失败就退回粗排
-                ranked = shortlist
-            try:
-                alive_flags = fut_alive.result() or {}
-            except Exception:  # noqa: BLE001
-                alive_flags = {}
+        # 排序默认走纯代码（0 成本、可复现、结果稳定）；ai.rank_mode="model" 才调模型。
+        _rank_mode = str((config_data.get("ai") or {}).get("rank_mode") or "code").lower()
+        _rank_client = client if _rank_mode == "model" else None
+        try:
+            ranked = ai.rank_links(intent, shortlist, _rank_client) or shortlist
+        except Exception:  # noqa: BLE001 - 排序失败就用原顺序
+            ranked = shortlist
 
-        for c in ranked:
-            if alive_flags.get(c["shareurl"]) is False:
-                dropped_dead += 1
-            else:
-                candidates.append(c)
+        # ⑤「看最新」：标题看不出它更新到哪一集，直接读一遍分享内容，
+        # 把真正有新内容的分享顶到前面。
+        # （实测：含「第2期上」的是几个标题写「第三季」的全季合集，只按标题排序会沉底）
+        # 和存活检测并行——两者都要发网络请求，串行会白等一倍时间。
+        def _probe_latest():
+            probe_acc = _require_cookie()
+            if probe_acc is None:
+                return
 
-    # ⑤ 补「这个分享里最新的文件」：标题看不出它更新到哪一集，
-    # 直接读一遍分享内容，把真正有新内容的分享顶到前面。
-    # （实测：含「第2期上」的是几个标题写「第三季」的全季合集，按标题排序会沉到最底部）
-    if candidates:
-        probe_account = _require_cookie()
-        if probe_account is not None:
             def _probe(c):
                 try:
-                    info = _share_latest(probe_account, c["shareurl"], max_files=60)
+                    info = _share_latest(probe_acc, c["shareurl"], max_files=60)
                 except Exception:  # noqa: BLE001
                     return
                 latest = info.get("latest") or []
@@ -1238,12 +1231,30 @@ def ai_search():
                     c["latest_total"] = info.get("total")
 
             with ThreadPoolExecutor(max_workers=8) as probe_pool:
-                list(probe_pool.map(_probe, candidates[:10]))
-            # 内容最新（最新文件日期）的排前面，同日期按相关度
-            candidates.sort(
-                key=lambda c: (c.get("latest_date") or "", c.get("score") or 0),
-                reverse=True,
-            )
+                list(probe_pool.map(_probe, ranked[:10]))
+
+        with ThreadPoolExecutor(max_workers=2) as outer:
+            fut_alive = outer.submit(_check_alive)
+            fut_probe = outer.submit(_probe_latest)
+            try:
+                alive_flags = fut_alive.result() or {}
+            except Exception:  # noqa: BLE001
+                alive_flags = {}
+            try:
+                fut_probe.result()
+            except Exception:  # noqa: BLE001
+                pass
+
+        for c in ranked:
+            if alive_flags.get(c["shareurl"]) is False:
+                dropped_dead += 1
+            else:
+                candidates.append(c)
+        # 内容最新（分享里最新文件的日期）排前面，同日期按相关度
+        candidates.sort(
+            key=lambda c: (c.get("latest_date") or "", c.get("score") or 0),
+            reverse=True,
+        )
 
     task, reason = _match_task_by_title(intent.get("title") or "")
     baseline = None

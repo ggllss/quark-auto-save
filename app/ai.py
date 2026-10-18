@@ -495,58 +495,92 @@ def _apply_ranking(candidates, raw):
     return out
 
 
+def _days_since(text):
+    """距今天数（解析不出返回 None）"""
+    from datetime import datetime, timezone
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:  # noqa: BLE001
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return max(0, (datetime.now(timezone.utc) - ts).days)
+
+
+_QUALITY_WORDS = (
+    ("remux", 4), ("2160p", 6), ("4k", 6), ("60fps", 3), ("高码", 3),
+    ("hdr", 3), ("杜比", 3), ("内封", 2), ("合集", 2), ("完结", 2), ("全", 1),
+)
+
+
 def _heuristic_rank(intent, candidates):
-    """本地排序：关键词命中为主，时间为辅"""
-    terms = []
-    for key in ("title",):
-        if intent.get(key):
-            terms.append(str(intent[key]).lower())
-    for alias in intent.get("aliases") or []:
-        terms.append(str(alias).lower())
+    """
+    本地排序（不调模型，0 成本、结果可复现）。
+
+    打分：剧名/别名命中 +60；季号匹配 +25 / 不符 -30；
+    画质版本词 0~10；发布时间新鲜度 0~15；来源权重 0~3。
+    「分享里最新文件」这一项由调用方探测后再二次排序（模型看不到内容）。
+    """
+    title = str(intent.get("title") or "").strip()
+    aliases = [str(a).strip() for a in (intent.get("aliases") or []) if a]
+    season = intent.get("season")
+    terms = [t.lower() for t in ([title] + aliases) if t]
 
     out = []
     for cand in candidates:
-        name = (cand.get("taskname") or "").lower()
+        name = cand.get("taskname") or ""
+        low = name.lower()
         score = 0.0
-        hits = [t for t in terms if t and t in name]
+        reasons = []
+
+        hits = [t for t in terms if t and t in low]
         if hits:
             score += 60
-        if intent.get("season"):
-            season_tokens = [f"第{intent['season']}季", f"s{intent['season']:02d}",
-                             f"s{intent['season']}", f"season {intent['season']}"]
-            if any(tok in name for tok in season_tokens):
+            reasons.append("标题含「%s」" % hits[0])
+        else:
+            reasons.append("标题未命中剧名")
+
+        m = re.search(r"第\s*([0-9一二三四五六七八九十]+)\s*季|(?<![A-Za-z])[Ss](\d{1,2})(?!\d)", name)
+        cand_season = None
+        if m:
+            token = m.group(1) or m.group(2)
+            cand_season = int(token) if token.isdigit() else _CN_NUM.get(token)
+        if season:
+            if cand_season == season:
                 score += 25
-        if any(k in name for k in ("更新", "合集", "全", "完结")):
-            score += 5
-        if cand.get("datetime"):
-            score += 5
-        reason = ("标题命中：" + "、".join(hits)) if hits else "标题未直接命中，按来源与时间排序"
+                reasons.append("第%d季" % season)
+            elif cand_season:
+                score -= 30
+                reasons.append("季号不符（第%d季）" % cand_season)
+
+        quality = 0
+        for word, add in _QUALITY_WORDS:
+            if word in low:
+                quality += add
+        if quality:
+            score += min(quality, 10)
+            reasons.append("画质/版本好")
+
+        days = _days_since(cand.get("datetime"))
+        if days is not None:
+            score += max(0.0, 15.0 - min(days, 15))
+            if days <= 3:
+                reasons.append("近 %d 天发布" % days)
+
+        source = (cand.get("source") or "").lower()
+        if source.startswith("tg"):
+            score += 3
+        elif source.startswith("plugin"):
+            score += 1
+
         item = dict(cand)
-        item["score"] = min(score, 99.0)
-        item["reason"] = reason
+        item["score"] = max(0.0, min(score, 99.0))
+        item["reason"] = "，".join(reasons)
         out.append(item)
     return out
-
-
-# --------------------------------------------------------------------------
-# ③ 命名规则推荐
-# --------------------------------------------------------------------------
-
-_RULE_SYSTEM = """你是影视文件命名专家。用户要把网盘分享里的剧集文件转存进媒体库，需要选一套重命名规则。
-
-只输出 JSON：
-{
-  "choice": 0,
-  "replace_template": "{TASKNAME}.{SXX}E{E}.{EXT}",
-  "reason": "一句话说明"
-}
-
-规则：
-- choice 是候选规则的下标，选最合适的那一个。
-- replace_template 可选：如果想微调，给出替换模板；不想改就原样返回所选规则的 replace。
-- 模板里只能使用这些变量：{vars}
-- 目标是让媒体库文件名统一规范、便于刮削（形如 剧名.S01E01.mkv）。
-- 只输出 JSON。"""
 
 
 def suggest_rename_rule(taskname, filenames, presets, apply_rule, client=None):
