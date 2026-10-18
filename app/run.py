@@ -1916,6 +1916,17 @@ def ai_analyze():
             else:
                 # 一个链接整季打包时，按文件自己所属的季分别入库
                 row_season = _season_of_path(f.get("dir_path")) or _season_of_text(name)
+                # 不在任何季目录里的（分享根目录混着的几期）：
+                # 用播出日期问 TMDB 该进第几季，避免落到剧名根目录下
+                if not row_season and not is_movie and tmdb_key:
+                    _d0 = _air_date(name, f.get("dir_path"))
+                    if _d0:
+                        try:
+                            row_season = tmdb.season_for_date(tmdb_key, taskname, _d0)
+                        except Exception:  # noqa: BLE001
+                            row_season = None
+                        if row_season:
+                            row["season_by_date"] = _d0
                 if multi_season and row_season:
                     _names = season_dir_names.get(row_season) or []
                     cmp_names = _names
@@ -1965,7 +1976,18 @@ def ai_analyze():
                 # 总比留着 12.08.mp4 这种名字刮削不出来强
                 _air = _air_date(name, f.get("dir_path"))
                 if _air:
-                    new_name = "%s.%s%s" % (taskname, _air, os.path.splitext(name)[1])
+                    _ep = None
+                    if tmdb_key and row_season:
+                        try:
+                            _ep = tmdb.episode_for_date(tmdb_key, taskname, row_season, _air)
+                        except Exception:  # noqa: BLE001
+                            _ep = None
+                    _ext2 = os.path.splitext(name)[1]
+                    if _ep:
+                        new_name = "%s.E%02d.%s%s" % (taskname, _ep, _air, _ext2)
+                        row["tmdb_episode"] = _ep
+                    else:
+                        new_name = "%s.%s%s" % (taskname, _air, _ext2)
                     in_rule = True
                     row["date_named"] = True
                     row["air_date"] = _air
@@ -1980,6 +2002,10 @@ def ai_analyze():
                 )
                 _tpl = rule_replace or ""
                 _num = season_map.get(name)
+                # 综艺的「第N期」就是集号：用 N，别用全局文件序号
+                _period = re.search(r"第\s*(\d{1,3})\s*期", name)
+                if _period and re.search(r"\{I+\}", _tpl) and not _num:
+                    _num = int(_period.group(1))
                 if _num and re.search(r"\{I+\}", _tpl):
                     # 把模板里的 {II} 换成 TMDB 的真实集号（补齐两位，和库里一致）
                     _tpl = re.sub(r"\{I+\}", str(_num).zfill(2), _tpl)
@@ -1988,9 +2014,15 @@ def ai_analyze():
                 # 让 MagicRename 从文件名猜会退回 S01（用户踩过这个坑）
                 if _season_label and re.search(r"\{SXX\}", _tpl):
                     _tpl = _tpl.replace("{SXX}", _season_label)
-                new_name = resolved_names.get(name) or (
-                    mr.sub(rule_pattern, _tpl, name) if rule_ok else name
-                )
+                # sort_file_list 的 {II} 是「全部文件的全局序号」，
+                # 多季分享里会变成 E118 这种；只有拿不到真实集号时才用它
+                _has_seq = bool(re.search(r"\{I+\}", rule_replace or ""))
+                if _has_seq and _num is None:
+                    new_name = resolved_names.get(name) or (
+                        mr.sub(rule_pattern, _tpl, name) if rule_ok else name
+                    )
+                else:
+                    new_name = mr.sub(rule_pattern, _tpl, name) if rule_ok else name
             # 集号补零：S02E6 → S02E06（和库里其它文件保持一致）
             if new_name and not is_movie:
                 new_name = re.sub(r"([Ss]\d\d[Ee])(\d)(?!\d)", r"\g<1>0\2", new_name)

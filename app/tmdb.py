@@ -321,7 +321,7 @@ def seasons_for_show(api_key, name):
         return []
 
     def _fetch():
-        data = _request(api_key, "/tv/%s" % tv_id)
+        data = _request(api_key, "/3/tv/%s" % tv_id)
         rows = []
         for season in data.get("seasons") or []:
             number = season.get("season_number")
@@ -334,3 +334,44 @@ def seasons_for_show(api_key, name):
         return [n for _, n in rows]
 
     return _cached(("seasons", tv_id), _fetch)
+
+
+def season_for_date(api_key, name, date):
+    """
+    某个播出日期属于第几季（返回季号）。
+
+    分享根目录常混着几期最新的节目，它们不在任何季目录里，
+    靠文件名里的日期问 TMDB 就知道该进 S09 还是 S10。
+    """
+    if not api_key or not name or not date:
+        return None
+    tv_id = resolve_show(api_key, name)
+    if not tv_id:
+        return None
+    for season in reversed(seasons_for_show(api_key, name)):
+        try:
+            episodes = season_episodes(api_key, tv_id, season)
+        except Exception:  # noqa: BLE001
+            continue
+        dates = [e.get("air_date") for e in episodes if e.get("air_date")]
+        if dates and min(dates) <= date <= max(dates):
+            return season
+    return None
+
+
+def episode_for_date(api_key, name, season, date):
+    """某一季里某个播出日期对应第几集"""
+    if not api_key or not name or not season or not date:
+        return None
+    tv_id = resolve_show(api_key, name)
+    if not tv_id:
+        return None
+    try:
+        episodes = season_episodes(api_key, tv_id, season)
+    except Exception:  # noqa: BLE001
+        return None
+    for ep in episodes:
+        if (ep.get("air_date") or "") == date:
+            number = ep.get("number")      # season_episodes 用的是 number
+            return number if isinstance(number, int) else None
+    return None
