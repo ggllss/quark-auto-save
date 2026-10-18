@@ -1340,6 +1340,39 @@ def _expand_share_files(account, pwd_id, stoken, root_fid="", max_depth=4, max_f
     return items, truncated
 
 
+def _expand_share_files_smart(account, pwd_id, stoken, root_fid="", max_files=600):
+    """
+    两段式展开：先展开 2 层（多数分享够用，省掉几秒 API 往返）；
+    如果还剩下没展开的目录（「合集/1-8季/第N季/年份/文件」这种 4 层结构），
+    只把那些目录继续往下展开，不重扫整棵树。
+    """
+    items, truncated = _expand_share_files(
+        account, pwd_id, stoken, root_fid, max_depth=2, max_files=max_files
+    )
+    pending = [i for i in items if i.get("dir") and not i.get("expanded")]
+    if not pending:
+        return items, truncated
+
+    keep = [i for i in items if not (i.get("dir") and not i.get("expanded"))]
+    for folder in pending:
+        if len(keep) >= max_files:
+            truncated = True
+            break
+        try:
+            sub, sub_trunc = _expand_share_files(
+                account, pwd_id, stoken, folder.get("fid") or "",
+                max_depth=2, max_files=max_files - len(keep),
+            )
+        except Exception:  # noqa: BLE001 - 单个目录失败不影响其它
+            sub, sub_trunc = [], False
+        truncated = truncated or sub_trunc
+        prefix = (folder.get("dir_path") or "") + (folder.get("file_name") or "") + "/"
+        for item in sub:
+            item["dir_path"] = prefix + (item.get("dir_path") or "")
+        keep.extend(sub)
+    return keep, truncated
+
+
 def _extract_se(name, mr):
     """从文件名里提取 (季, 集)。提取不到返回 None。
 
@@ -1535,8 +1568,8 @@ def ai_analyze():
             return jsonify({"success": False, "message": "分享为空，文件可能已被删除"})
         # 分享常常是「剧名/S04/E01.mkv」这种嵌套结构，用户要选的是文件。
         # 递归展开文件夹，直接列出每一集（超过上限的文件夹仍作为一行保留）
-        share_list, truncated = _expand_share_files(
-            account, pwd_id, stoken, pdir_fid or "", max_depth=4, max_files=600
+        share_list, truncated = _expand_share_files_smart(
+            account, pwd_id, stoken, pdir_fid or "", max_files=600
         )
         if not share_list:
             return jsonify({"success": False, "message": "分享为空，文件可能已被删除"})
@@ -2185,8 +2218,8 @@ def _share_latest(account, shareurl, max_files=120):
     stoken = stoken_ret["data"]["stoken"]
     # 必须先带 _fetch_share=1 拉一次，后续 get_detail 才拿得到列表
     account.get_detail(pwd_id, stoken, pdir_fid or "", _fetch_share=1, fetch_share_full_path=1)
-    items, truncated = _expand_share_files(
-        account, pwd_id, stoken, pdir_fid or "", max_depth=4, max_files=max_files
+    items, truncated = _expand_share_files_smart(
+        account, pwd_id, stoken, pdir_fid or "", max_files=max_files
     )
     files = [i for i in items if not i.get("dir")]
     for f in files:
