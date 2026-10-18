@@ -373,12 +373,15 @@ _AUX_EXTS = (
 
 # 电影文件名里的 release 垃圾（分辨率/来源/编码/音轨/语言标记）
 _MOVIE_JUNK_RE = re.compile(
-    r"(2160p|1080p|720p|480p|4k|uhd|blu-?ray|bluray|remux|web-?dl|webrip|hdtv|"
+    # 英文/数字的版本词必须加词边界：不加的话 `ma`（DTS-MA 用的）会把
+    # XIONGMAO3 里的「MA」吃掉、`dv` 会吃掉「DVDRip」以外的东西，
+    # 结果片名被改成「XIONG O3」这种鬼样子。
+    r"(?:\b(?:2160p|1080p|720p|480p|4k|uhd|blu-?ray|bluray|remux|web-?dl|webrip|hdtv|"
     r"x265|x264|h265|h264|hevc|avc|10bit|8bit|hdr10|hdr|dolby|dovi|dv|"
-    r"dts-?hd|dts|truehd|atmos|aac|ac3|eac3|flac|ma|5\.1|7\.1|2\.0|60fps|hfr|"
-    r"proper|repack|extended|hq|国英双语|国语|英语|双语|内封|简英|中字|字幕|"
-    r"蓝光|原盘|合集|臻彩|高码率|高码|无水印|纯净版|外挂|简中|繁中|中英|内嵌|硬字幕|"
-    r"ddp|dd5|dd7|eac3|opus|lpcm|aac2|hdr10\+|hdr10|sdr|dv|国粤|粤语|普通话)",
+    r"dts-?hd|dts|truehd|atmos|aac2|aac|ac3|eac3|flac|ma|5\.1|7\.1|2\.0|60fps|hfr|"
+    r"proper|repack|extended|hq|ddp|dd5|dd7|opus|lpcm|sdr|uhdrip|bdrip|hdrip)\b"
+    r"|国英双语|国语|英语|双语|内封|简英|中字|字幕|蓝光|原盘|合集|臻彩|高码率|高码|"
+    r"无水印|纯净版|外挂|简中|繁中|中英|内嵌|硬字幕|国粤|粤语|普通话)",
     re.I,
 )
 
@@ -2009,6 +2012,12 @@ def ai_analyze():
                 if not _year:
                     _year = _fy
                 _title = _title or taskname
+                # 目录名是全大写拼音缩写（XIONGMAO3）又没有年份时，用剧名更靠谱
+                if (_title and not _year
+                        and re.fullmatch(r"[A-Z0-9._\-]{3,}", _title)
+                        and taskname
+                        and not re.fullmatch(r"[A-Z0-9._\-]{3,}", taskname)):
+                    _title = taskname
                 _label = ("%s (%s)" % (_title, _year)) if _year else _title
                 _ver = _movie_version(name) if movie_counts.get((_title, _year), 0) > 1 else ""
                 _ext = os.path.splitext(name)[1]

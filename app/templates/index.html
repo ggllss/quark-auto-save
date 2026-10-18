@@ -1048,6 +1048,9 @@
                       <div v-if="row.is_extra && row.target_dir" class="small text-info">
                         花絮素材 → 收进 {{ row.target_dir }}
                       </div>
+                      <div v-else-if="row.target_dir && aiResult.movie_mode" class="small text-info">
+                        电影目录 → {{ row.target_dir }}
+                      </div>
                       <div v-else-if="row.target_dir" class="small text-info">
                         分季入库 → {{ row.target_dir }}
                       </div>

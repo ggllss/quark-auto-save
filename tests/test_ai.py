@@ -127,6 +127,25 @@ def test_category_mapping():
     check("查不到返回空", tmdb.category_from_kind(None) == "")
 
 
+def test_movie_junk_words():
+    print("【6f】电影片名：版本词不能吃掉片名里的字母")
+    import run  # run.py 依赖 Flask，放到函数里导入
+    # 回归：_MOVIE_JUNK_RE 里的 ma（DTS-MA）曾把 XIONGMAO3 的 MA 吃掉
+    check("XIONGMAO3 不被改坏", run._movie_title_year("XIONGMAO3")[0] == "XIONGMAO3",
+          run._movie_title_year("XIONGMAO3"))
+    check(
+        "DTS-MA 仍然能被识别为版本词",
+        run._movie_title_year("流浪地球2.2023.4K.HDR.DTS-MA.5.1")[0] == "流浪地球2",
+        run._movie_title_year("流浪地球2.2023.4K.HDR.DTS-MA.5.1"),
+    )
+    check(
+        "英文片名正常",
+        run._movie_title_year("Kung.Fu.Panda.3.2016.2160p.BluRay.x265")[0] == "Kung Fu Panda 3",
+        run._movie_title_year("Kung.Fu.Panda.3.2016.2160p.BluRay.x265"),
+    )
+    check("年份能取出", run._movie_title_year("虎虎虎.1970.BD中英双字")[1] == "1970")
+
+
 def test_pick_aliases():
     print("【6e】别名挑选：优先英文/中文，剔掉冷门译名")
     items = [
@@ -842,6 +861,7 @@ def main():
     test_template_safety()
     test_rule_local(mr, presets, files)
     test_category_mapping()
+    test_movie_junk_words()
     test_pick_aliases()
     test_rule_skip_model()
     test_heuristic_rank()
