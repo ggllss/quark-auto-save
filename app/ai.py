@@ -583,6 +583,23 @@ def _heuristic_rank(intent, candidates):
     return out
 
 
+_RULE_SYSTEM = """你是影视文件命名专家。用户要把网盘分享里的剧集文件转存进媒体库，需要选一套重命名规则。
+
+只输出 JSON：
+{
+  "choice": 0,
+  "replace_template": "{TASKNAME}.{SXX}E{E}.{EXT}",
+  "reason": "一句话说明"
+}
+
+规则：
+- choice 是候选规则的下标，选最合适的那一个。
+- replace_template 可选：如果想微调，给出替换模板；不想改就原样返回所选规则的 replace。
+- 模板里只能使用这些变量：{vars}
+- 目标是让媒体库文件名统一规范、便于刮削（形如 剧名.S01E01.mkv）。
+- 只输出 JSON。"""
+
+
 def suggest_rename_rule(taskname, filenames, presets, apply_rule, client=None):
     """
     推荐重命名规则。

@@ -106,6 +106,35 @@ def test_rule_local(mr, presets, files):
     check("任务名注入生效", any("背着善宰跑" in p["to"] for p in preview), preview)
 
 
+def test_heuristic_rank():
+    print("【6b】确定性排序：季号、画质、新鲜度")
+    intent = {"title": "现在就出发", "season": 4, "aliases": []}
+    cands = [
+        {"taskname": "现在就出发 第三季 更1015", "source": "tg", "datetime": "2026-10-17T00:00:00"},
+        {"taskname": "现在就出发 第四季 更1015", "source": "tg", "datetime": "2026-10-17T00:00:00"},
+    ]
+    ranked = ai.rank_links(intent, cands, None)
+    check("季号不符的被压到后面", "第四季" in ranked[0]["taskname"], ranked[0]["taskname"])
+    check(
+        "季号不符扣分",
+        ranked[1]["score"] < ranked[0]["score"],
+        (ranked[0]["score"], ranked[1]["score"]),
+    )
+
+    # 同为第四季时，画质词和新鲜度决定顺序
+    cands2 = [
+        {"taskname": "现在就出发 第四季 1080p", "source": "tg", "datetime": "2026-09-01T00:00:00"},
+        {"taskname": "现在就出发 第四季 4K 60fps 高码", "source": "tg", "datetime": "2026-10-17T00:00:00"},
+    ]
+    ranked2 = ai.rank_links(intent, cands2, None)
+    check("画质好且更新的排第一", "4K" in ranked2[0]["taskname"], ranked2[0]["taskname"])
+    check("排序结果带理由", bool(ranked2[0].get("reason")), ranked2[0].get("reason"))
+    check(
+        "没有候选时返回空",
+        ai.rank_links(intent, [], None) == [],
+    )
+
+
 def test_ai_paths(mr, presets, files):
     print("【5】意图解析：AI 分支与异常降级")
     client = StubClient(
@@ -762,6 +791,7 @@ def main():
     test_json_extract()
     test_template_safety()
     test_rule_local(mr, presets, files)
+    test_heuristic_rank()
     test_ai_paths(mr, presets, files)
     test_http_layer()
     test_folder_match()
