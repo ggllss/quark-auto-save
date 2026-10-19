@@ -1178,14 +1178,15 @@ def ai_search():
                 intent["source"] = "local+tmdb+ai"
         except Exception:  # noqa: BLE001
             pass
-    queries = [(q or "").lower() for q in (intent.get("queries") or [])[:3] if q]
+    # 4 个检索词并行打源：多一个词多一份覆盖，耗时不变（并发）
+    queries = [(q or "").lower() for q in (intent.get("queries") or [])[:4] if q]
 
     def gather():
         pool, seen = [], set()
         if not queries:
             return pool
         # 多个检索词并行打源：串行时最坏要等 N 倍，并行只等最慢的那个
-        with ThreadPoolExecutor(max_workers=min(3, len(queries))) as ex:
+        with ThreadPoolExecutor(max_workers=min(4, len(queries))) as ex:
             futures = [ex.submit(_collect_suggestions, q, False) for q in queries]
             for fut in as_completed(futures):
                 try:
