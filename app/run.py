@@ -2225,6 +2225,24 @@ def ai_analyze():
                 if not re.fullmatch(r"[Ss]\d{1,2}", _tail2):
                     row["target_savepath"] = "%s/S%02d" % (_cur_tp, _sw_n)
                     row["target_dir"] = "S%02d" % _sw_n
+            # 有播出日期、TMDB 又能对上集号时，用 TMDB 的集号覆盖期号。
+            # 综艺一期分上下集时「第2期上」「第2期下」的期号都是 2，
+            # 只按期号会双双变成 E02 → 撞名，还会被误判成重复文件。
+            # （现在就出发 S04：第2期上=2026-10-17=E03、第2期下=2026-10-18=E04）
+            if not is_movie and not is_extra and row_season and tmdb_key:
+                _air_d = _air_date(name, f.get("dir_path"))
+                if _air_d:
+                    try:
+                        _ep_t = tmdb.episode_for_date(tmdb_key, taskname, row_season, _air_d)
+                    except Exception:  # noqa: BLE001
+                        _ep_t = None
+                    if _ep_t:
+                        _fixed = re.sub(
+                            r"([Ss]\d{2})[Ee]\d{1,3}", r"\g<1>E%02d" % _ep_t, row["new_name"]
+                        )
+                        if _fixed != row["new_name"]:
+                            row["new_name"] = _fixed
+                            row["tmdb_episode"] = _ep_t
             row["in_rule"] = in_rule
             if rule_ok and re.search(
                 r"\{(TASKNAME|SXX|S|E|I+|EXT|PART|DATE|YEAR|CHINESE|VER)\}", new_name or ""
