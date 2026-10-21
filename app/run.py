@@ -319,6 +319,9 @@ def _season_of_text(text, strict=False):
         # 严格模式只认显式的 Sxx / 第N季 / Season N，
         # 不走下面的裸数字兜底（「我的三体之章北海传_06.mkv」的 06 是集号）
         return None
+    # 先把日期摘掉：目录名「哈哈hhh【2025-07-22】」里的 22 会被当成第 22 季
+    text = re.sub(r"(?:19|20)\d{2}\s*[-./年]\s*\d{1,2}\s*[-./月]\s*\d{1,2}", " ", text)
+    text = re.sub(r"(?:19|20)\d{2}\s*[-./年]\s*\d{1,2}(?!\d)", " ", text)
     # 分享常用「[王牌对王牌4][2019]」这种带括号的写法：
     # 先把括号里的 4 位年份摘掉，再剥掉括号本身，才认得出季号 4
     cleaned = re.sub(r"[(（\[【]\s*(?:19|20)\d{2}\s*[)）\]】]", " ", text)
@@ -513,7 +516,7 @@ def _seasons_in_share(items):
                 if re.fullmatch(r"[\d\s._-]+", piece.strip() or "x"):
                     continue
                 season = _season_of_text(piece, strict=is_file)
-                if season:
+                if season and 1 <= season <= 30:   # 22 这种是日期被误当季号
                     seasons.add(season)
     return seasons
 
@@ -2379,6 +2382,20 @@ def ai_analyze():
     # 综艺正片集号：第N期上 = (N-1)*2+1，第N期下 = (N-1)*2+2。
     # 这是确定的算术关系，不该依赖 TMDB（之前绕去查 TMDB，查错剧就算成 E19）。
     if category == "综艺":
+        # 先按「季」判断这一季有没有上下集：
+        # 有上下集 → 每期占 2 个编号（第N期上=(N-1)*2+1，下=+2）
+        # 没上下集 → 期号就是集号（第12期=E12）
+        # 混用会让「第5期」和「第3期上」都算成 E05。
+        _has_part = {}
+        for _r in rows:
+            if _r.get("aux") or _r.get("dir") or _r.get("is_extra"):
+                continue
+            _fn0 = _r.get("file_name") or ""
+            _sw0 = _r.get("target_savepath") or ""
+            if re.search(r"第\s*\d{1,3}\s*[期集]\s*[上下]", _fn0):
+                _has_part[_sw0] = True
+            else:
+                _has_part.setdefault(_sw0, False)
         for _r in rows:
             if _r.get("aux") or _r.get("dir") or _r.get("is_extra"):
                 continue
@@ -2391,12 +2408,15 @@ def ai_analyze():
             _n = int(_m_pn.group(1))
             # 只看「第N期」紧跟的那个字，避免标题里的「传下去」「上下集」误判
             _tail_ch = _fn[_m_pn.end() : _m_pn.end() + 1]
-            if _tail_ch in ("下", "后"):
-                _ep = (_n - 1) * 2 + 2
-            elif _tail_ch == "上":
-                _ep = (_n - 1) * 2 + 1
+            _sw_key = _r.get("target_savepath") or ""
+            if _has_part.get(_sw_key):
+                # 这一季是上下集格式：每期占两个编号
+                if _tail_ch in ("下", "后"):
+                    _ep = (_n - 1) * 2 + 2
+                else:
+                    _ep = (_n - 1) * 2 + 1
             else:
-                _ep = _n          # 不分上下集，期号就是集号
+                _ep = _n          # 这一季不分上下集，期号就是集号
             _nm = _r.get("new_name") or ""
             _fixed2 = re.sub(r"\.E\d{1,3}", ".E%02d" % _ep, _nm, count=1)
             if _fixed2 == _nm:
