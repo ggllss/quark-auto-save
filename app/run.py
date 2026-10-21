@@ -2426,6 +2426,32 @@ def ai_analyze():
             _r["new_name"] = _fixed2
             _r["ep_local"] = _ep
 
+    # 同一季里同时存在「整期」和「上/下集」时：保留上下集，整期标为重复。
+    # （用户选择：上下集是拆分后的完整内容，整期属于重复）
+    if category == "综艺":
+        _split_periods = {}
+        for _r in rows:
+            if _r.get("aux") or _r.get("dir") or _r.get("is_extra"):
+                continue
+            _fn = _r.get("file_name") or ""
+            _m = re.search(r"第\s*(\d{1,3})\s*[期集]\s*[上下]", _fn)
+            if _m:
+                _split_periods[
+                    ((_r.get("target_savepath") or ""), int(_m.group(1)))
+                ] = True
+        for _r in rows:
+            if _r.get("aux") or _r.get("dir") or _r.get("is_extra"):
+                continue
+            _fn = _r.get("file_name") or ""
+            _m = re.search(r"第\s*(\d{1,3})\s*[期集](?!\s*[上下])", _fn)
+            if not _m:
+                continue
+            if _split_periods.get(((_r.get("target_savepath") or ""), int(_m.group(1)))):
+                _r["dup_copy"] = True
+                _r["default_selected"] = False
+                _r["status"] = "dup_copy"
+                _r["status_text"] = "重复文件（整期与上下集重复，已留上下集）"
+
     # 海报/nfo 这类辅助文件单独标一下，别混在「不匹配规则」里
     for _r in rows:
         if _r.get("aux") and _r.get("status") == "unmatched":
