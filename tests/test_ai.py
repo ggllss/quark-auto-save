@@ -858,6 +858,359 @@ def test_movie_mode():
           run._movie_version("流浪地球.mkv"))
 
 
+def test_custom_categories():
+    print("【22】类型目录：内置五个不可删改，新增类型按剧集处理")
+    import run
+
+    builtin = ["电视剧", "电影", "动漫", "综艺", "纪录片"]
+
+    def fake_list(path):
+        p = path.rstrip("/")
+        if p == "/0-影音/短剧":
+            return [{"file_name": "闪婚后大佬他又宠又撩", "dir": True}]
+        if p == "/0-影音/短剧/闪婚后大佬他又宠又撩":
+            return [{"file_name": "S02", "dir": True},
+                    {"file_name": "E01.mp4", "dir": False}]
+        return None
+
+    orig_list = run._list_dir_items
+    orig_cfg = run.config_data
+    run._list_dir_items = fake_list
+    try:
+        # 配了「短剧」：类型列表含它，入库路径按剧集处理
+        run.config_data = {
+            "ai": {"categories": ["短剧"], "media_roots": {"短剧": "/0-影音/短剧"}},
+            "tasklist": [],
+        }
+        names = run._type_names()
+        check("自定义类型进入类型列表", "短剧" in names, names)
+        check("内置五个固定在最前且顺序不变", names[:5] == builtin, names)
+        check(
+            "AI 解析认得自定义类型",
+            ai.parse_intent(
+                "闪婚 第一季",
+                StubClient('{"title":"闪婚","season":1,"category":"短剧"}'),
+                names,
+            )["category"] == "短剧",
+        )
+        check(
+            "system 提示里带上自定义类型",
+            "短剧" in ai.parse_system_prompt(names),
+        )
+        check(
+            "没配时不认自定义类型（默认行为不变）",
+            ai.parse_intent(
+                "闪婚", StubClient('{"title":"闪婚","category":"短剧"}')
+            )["category"] == "",
+        )
+        check("自定义类型按剧集处理（做季推断）", run._is_series_type("短剧") is True)
+        check("自定义类型不是电影", run._is_movie_type("短剧") is False)
+        check("自定义类型不是综艺", run._is_variety_type("短剧") is False)
+        check("纪录片仍不按剧集处理", run._is_series_type("纪录片") is False)
+        check("空类型不按剧集处理", run._is_series_type("") is False)
+
+        r = run._resolve_media_path("闪婚后大佬他又宠又撩", [], None, "短剧")
+        check("短剧走自己的根目录", r["category"] == "短剧" and r["root"] == "/0-影音/短剧",
+              (r["category"], r["root"]))
+        check("短剧自动推断季号并套 S02",
+              r["season"] == 2 and r["savepath"] == "/0-影音/短剧/闪婚后大佬他又宠又撩/S02",
+              (r["season"], r["savepath"]))
+        check("短剧命中已有剧集文件夹", r["folder_exists"] is True)
+
+        # 保存路径里的「短剧」段能被识别成类型根目录（不配 media_roots 也能用）
+        run.config_data = {
+            "ai": {"categories": ["短剧"]},
+            "tasklist": [{"savepath": "/0-影音/短剧/闪婚后大佬他又宠又撩/S02"}],
+        }
+        check("保存路径里的「短剧」段被识别为类型根目录",
+              run._infer_media_roots().get("短剧") == "/0-影音/短剧",
+              run._infer_media_roots())
+
+        # 配置里漏掉内置项：并集清理后内置五个仍必须在
+        run.config_data = {"ai": {"categories": ["短剧"]}, "tasklist": []}
+        check("配置漏掉内置项时仍返回内置五个 + 额外项",
+              run._type_names() == builtin + ["短剧"], run._type_names())
+        run.config_data = {"ai": {"categories": []}, "tasklist": []}
+        check("空配置就是内置五个", run._type_names() == builtin, run._type_names())
+        run.config_data = {"tasklist": []}
+        check("没有 ai 段时就是内置五个", run._type_names() == builtin, run._type_names())
+
+        # 脏配置：空白、空串、路径分隔符、重复、超长、超量
+        run.config_data = {
+            "ai": {"categories": [" 短剧 ", "", "a/b", "短剧", "电影", "超长类型名称超长类型名称"]},
+            "tasklist": [],
+        }
+        cleaned = run._type_names()
+        check("去首尾空白", "短剧" in cleaned and " 短剧 " not in cleaned, cleaned)
+        check("空串被丢弃", "" not in cleaned, cleaned)
+        check("含 / 或 \\ 的名称被丢弃",
+              not any("/" in c or "\\" in c for c in cleaned), cleaned)
+        check("重复项只留一次", cleaned.count("短剧") == 1, cleaned)
+        check("单项截断到 10 字", all(len(c) <= 10 for c in cleaned), cleaned)
+        check("内置项混在配置里也不重复", cleaned[:5] == builtin and cleaned.count("电影") == 1,
+              cleaned)
+
+        run.config_data = {
+            "ai": {"categories": ["类%d" % i for i in range(20)]},
+            "tasklist": [],
+        }
+        check("类型总数封顶 12", len(run._type_names()) == 12, len(run._type_names()))
+    finally:
+        run._list_dir_items = orig_list
+        run.config_data = orig_cfg
+
+
+def test_pattern_presets():
+    print("【23】内置规则预设：注入 magic_regex + 类型 → 预设映射")
+    import re as _re
+
+    import run
+
+    orig_cfg = run.config_data
+    try:
+        # ① 配置为空：注入后含三个内置预设，映射用默认表
+        run.config_data = {"tasklist": []}
+        presets = run._ensure_magic_presets()
+        for name in ("$TV_MAGIC", "$SHOW_MAGIC", "$MOVIE_MAGIC"):
+            check("注入内置预设 %s" % name, name in presets, sorted(presets))
+        check("内置预设就是三个", set(run._BUILTIN_MAGIC_PRESETS) ==
+              {"$TV_MAGIC", "$SHOW_MAGIC", "$MOVIE_MAGIC"},
+              sorted(run._BUILTIN_MAGIC_PRESETS))
+        check("$SHOW_MAGIC 的模板与约定一致",
+              presets["$SHOW_MAGIC"]["replace"] == "{TASKNAME}.E{II}.第{E}期{PART}.{EXT}",
+              presets["$SHOW_MAGIC"])
+        check("三个内置 pattern 都能编译",
+              all(_re.compile(p["pattern"]) for p in presets.values()
+                  if p.get("pattern")))
+        check("默认映射表就是三条", run._pattern_map() ==
+              {"综艺": "$SHOW_MAGIC", "电影": "$MOVIE_MAGIC", "纪录片": "$TV_MAGIC"},
+              run._pattern_map())
+        check("magic_regex 为空时也补出三个（/data 走这条）",
+              set(run._merge_magic_presets(None)) ==
+              {"$TV_MAGIC", "$SHOW_MAGIC", "$MOVIE_MAGIC"},
+              sorted(run._merge_magic_presets(None)))
+
+        # ② 配置里同名的保留用户值，不被内置覆盖
+        run.config_data = {
+            "tasklist": [],
+            "magic_regex": {"$TV_MAGIC": {"pattern": r".*\.(mp4)$",
+                                          "replace": "{TASKNAME}.{EXT}"}},
+        }
+        presets = run._ensure_magic_presets()
+        check("配置里已有的 $TV_MAGIC 不被覆盖",
+              presets["$TV_MAGIC"]["replace"] == "{TASKNAME}.{EXT}", presets["$TV_MAGIC"])
+        check("缺的预设照旧补进来", "$SHOW_MAGIC" in presets, sorted(presets))
+
+        # ③ 类型 → 预设（默认表 + 未知类型回落）
+        run.config_data = {"tasklist": []}
+        check("综艺 → $SHOW_MAGIC", run._suggest_pattern("综艺") == "$SHOW_MAGIC",
+              run._suggest_pattern("综艺"))
+        check("电影 → $MOVIE_MAGIC", run._suggest_pattern("电影") == "$MOVIE_MAGIC",
+              run._suggest_pattern("电影"))
+        check("电视剧 → $TV_MAGIC", run._suggest_pattern("电视剧") == "$TV_MAGIC",
+              run._suggest_pattern("电视剧"))
+        check("纪录片 → $TV_MAGIC", run._suggest_pattern("纪录片") == "$TV_MAGIC",
+              run._suggest_pattern("纪录片"))
+        check("未知类型回落 $TV_MAGIC", run._suggest_pattern("短剧") == "$TV_MAGIC",
+              run._suggest_pattern("短剧"))
+        check("空类型回落 $TV_MAGIC", run._suggest_pattern("") == "$TV_MAGIC",
+              run._suggest_pattern(""))
+
+        # ④ 映射可配置：覆盖默认；指向不存在的预设时回落
+        run.config_data = {"tasklist": [], "ai": {"pattern_map": {"综艺": "$MOVIE_MAGIC"}}}
+        check("pattern_map 覆盖默认映射",
+              run._suggest_pattern("综艺") == "$MOVIE_MAGIC", run._suggest_pattern("综艺"))
+        check("覆盖后其他类型仍走默认表",
+              run._suggest_pattern("电影") == "$MOVIE_MAGIC", run._suggest_pattern("电影"))
+        run.config_data = {"tasklist": [], "ai": {"pattern_map": {"综艺": "$NOPE_MAGIC"}}}
+        check("指向不存在的预设回落 $TV_MAGIC",
+              run._suggest_pattern("综艺") == "$TV_MAGIC", run._suggest_pattern("综艺"))
+        run.config_data = {"tasklist": [], "ai": {"pattern_map": {"短剧": "$SHOW_MAGIC"}}}
+        check("自定义类型也能配映射",
+              run._suggest_pattern("短剧") == "$SHOW_MAGIC", run._suggest_pattern("短剧"))
+        # 脏配置：非字符串 / 空串 / 非 dict 都不炸
+        run.config_data = {"tasklist": [], "ai": {"pattern_map": {"综艺": "", "电影": None}}}
+        check("映射里的空值被忽略",
+              run._suggest_pattern("综艺") == "$SHOW_MAGIC", run._suggest_pattern("综艺"))
+        run.config_data = {"tasklist": [], "ai": {"pattern_map": "oops"}}
+        check("pattern_map 不是对象时用默认表",
+              run._pattern_map() == {"综艺": "$SHOW_MAGIC", "电影": "$MOVIE_MAGIC",
+                                     "纪录片": "$TV_MAGIC"}, run._pattern_map())
+    finally:
+        run.config_data = orig_cfg
+
+
+def test_anime_episode():
+    print("【22】动漫集号：剔除技术标签 + 「篇N」格式")
+    import run
+
+    mr = MagicRename()
+    mr.set_taskname("狐妖小红娘")
+    # 取自分享里的真实文件名（黄风岭篇）
+    f13 = "[H] ヲ 瓜女天小糸工女良13 黄风岭篇 13 [4K][HEVC,AAC][2026.10.15].mp4"
+    f06 = "[H] ヲ 瓜女天小糸工女良13 黄风岭篇 06 [4K][HEVC,AAC][2026.09.17].mp4"
+    f01 = "[H] ヲ 瓜女天小糸工女良13 黄风岭篇 01 [4K][HEVC,AAC][2026.09.11].mp4"
+
+    check("篇13 → 13（来源篇N）", run._strict_episode(f13) == (13, "篇N"),
+          run._strict_episode(f13))
+    check("篇06 → 6", run._strict_episode(f06) == (6, "篇N"), run._strict_episode(f06))
+    check("篇01 → 1", run._strict_episode(f01) == (1, "篇N"), run._strict_episode(f01))
+
+    # 清洗后抽集号：日期里的 10 / 09 不能再被当成集号
+    check("清洗掉 [4K]", "4K" not in run._strip_tech_tags(f13), run._strip_tech_tags(f13))
+    check("清洗掉 [HEVC,AAC]", "HEVC" not in run._strip_tech_tags(f13),
+          run._strip_tech_tags(f13))
+    check("清洗掉 [2026.10.15]", "2026.10.15" not in run._strip_tech_tags(f13),
+          run._strip_tech_tags(f13))
+    check("_extract_se 篇13 → 13", run._extract_se(f13, mr)[1] == 13,
+          run._extract_se(f13, mr))
+    check("_extract_se 篇06 → 6", run._extract_se(f06, mr)[1] == 6,
+          run._extract_se(f06, mr))
+    check("_extract_se 篇01 → 1", run._extract_se(f01, mr)[1] == 1,
+          run._extract_se(f01, mr))
+    check("三个文件都不再把日期当集号",
+          all(run._extract_se(f, mr)[1] not in (10, 9) for f in (f13, f06, f01)),
+          [run._extract_se(f, mr) for f in (f13, f06, f01)])
+
+    # 含汉字的方括号不能被清洗（里面可能有真集号）
+    check("【第13集】保留",
+          "【第13集】" in run._strip_tech_tags("剧名【第13集】[1080p].mp4"),
+          run._strip_tech_tags("剧名【第13集】[1080p].mp4"))
+    check("【第13集】仍能抽出 13",
+          run._strict_episode(run._strip_tech_tags("剧名【第13集】[1080p].mp4"))[0] == 13,
+          run._strict_episode(run._strip_tech_tags("剧名【第13集】[1080p].mp4")))
+    check("[国语中字] 保留（含汉字）",
+          "[国语中字]" in run._strip_tech_tags("剧名[国语中字][4K].mp4"),
+          run._strip_tech_tags("剧名[国语中字][4K].mp4"))
+
+    # _air_date 依赖方括号里的日期，不能被清洗影响
+    check("_air_date 仍取到 2026-10-15", run._air_date(f13) == "2026-10-15",
+          run._air_date(f13))
+    check("纯日期文件名仍取到日期", run._air_date("[2026.10.15].mp4") == "2026-10-15",
+          run._air_date("[2026.10.15].mp4"))
+
+    # 只认明确标记，裸数字不算
+    check("S02E06 → 6（SxxExx）", run._strict_episode("剧名.S02E06.mp4") == (6, "SxxExx"),
+          run._strict_episode("剧名.S02E06.mp4"))
+    check("EP09 → 9（EPxx）", run._strict_episode("剧名.EP09.mp4") == (9, "EPxx"),
+          run._strict_episode("剧名.EP09.mp4"))
+    check("第3集 → 3（第N集）", run._strict_episode("剧名.第3集.mp4") == (3, "第N集"),
+          run._strict_episode("剧名.第3集.mp4"))
+    check("裸数字不算可信集号", run._strict_episode("我的三体之章北海传_06.mkv") == (None, ""),
+          run._strict_episode("我的三体之章北海传_06.mkv"))
+
+    # 冲突时用可信集号改写 E 号
+    check("S01E10 → S01E13",
+          run._apply_trusted_episode("狐妖小红娘.S01E10.mp4", f13)[0]
+          == "狐妖小红娘.S01E13.mp4",
+          run._apply_trusted_episode("狐妖小红娘.S01E10.mp4", f13))
+    check("综艺无季号写法 .E09 → .E06",
+          run._apply_trusted_episode("狐妖小红娘.E09.第9期.mp4", f06)[0]
+          == "狐妖小红娘.E06.第9期.mp4",
+          run._apply_trusted_episode("狐妖小红娘.E09.第9期.mp4", f06))
+    check("集号一致时名字不动",
+          run._apply_trusted_episode("狐妖小红娘.S13E13.mp4", f13)[0]
+          == "狐妖小红娘.S13E13.mp4",
+          run._apply_trusted_episode("狐妖小红娘.S13E13.mp4", f13))
+    check("没有可信集号时不改", run._apply_trusted_episode("剧名.S01E09.mp4", "12.08.mp4")[0]
+          == "剧名.S01E09.mp4", run._apply_trusted_episode("剧名.S01E09.mp4", "12.08.mp4"))
+
+
+def test_tmdb_show_pick():
+    print("【23】TMDB 条目选择：分篇剧集（黄风岭篇）")
+    import re
+    import run
+    import tmdb
+
+    # 真实 TMDB 结构（离线桩）：主条目把全部篇合成 S01 共 183 集
+    search_hits = {
+        "狐妖小红娘": [
+            {"id": 75787, "name": "狐妖小红娘", "first_air_date": "2015-06-26"},
+            {"id": 337569, "name": "狐妖小红娘（分季版）", "first_air_date": "2015-06-26"},
+        ],
+        "狐妖小红娘 黄风岭篇": [
+            {"id": 336065, "name": "狐妖小红娘 黄风岭篇", "first_air_date": "2026-09-11"},
+        ],
+        # 「月红篇」在 TMDB 没有独立条目，只能靠分季版的季名认出来
+        "狐妖小红娘 月红篇": [],
+    }
+    seasons = {
+        75787: [
+            {"season_number": 1, "name": "第 1 季", "episode_count": 183,
+             "air_date": "2015-06-26"},
+        ],
+        336065: [
+            {"season_number": 13, "name": "黄风岭篇", "episode_count": 16,
+             "air_date": "2026-09-11"},
+        ],
+        337569: [
+            {"season_number": 1, "name": "下沙篇", "episode_count": 10,
+             "air_date": "2015-06-26"},
+            {"season_number": 8, "name": "月红篇", "episode_count": 12,
+             "air_date": "2021-06-26"},
+            {"season_number": 13, "name": "黄风岭篇", "episode_count": 16,
+             "air_date": "2026-09-11"},
+        ],
+    }
+    real_request = tmdb._request
+
+    def fake_request(api_key, path, params=None, timeout=15):
+        if path == "/3/search/tv":
+            query = (params or {}).get("query") or ""
+            return {"results": search_hits.get(query, [])}
+        m = re.match(r"^/3/tv/(\d+)$", path)
+        if m:
+            return {"seasons": seasons.get(int(m.group(1)), [])}
+        raise RuntimeError("未知路径 %s" % path)
+
+    try:
+        tmdb._request = fake_request
+        tmdb._cache.clear()
+
+        f13 = "[H] ヲ 瓜女天小糸工女良13 黄风岭篇 13 [4K][HEVC,AAC][2026.10.15].mp4"
+        files = [
+            f13,
+            "[H] ヲ 瓜女天小糸工女良13 黄风岭篇 06 [4K][HEVC,AAC][2026.09.17].mp4",
+        ]
+        check("篇名取众数", tmdb.pian_from_filenames(files) == "黄风岭篇",
+              tmdb.pian_from_filenames(files))
+        check("没有篇名时返回空串", tmdb.pian_from_filenames(["剧名.01.mp4"]) == "",
+              tmdb.pian_from_filenames(["剧名.01.mp4"]))
+
+        hit = tmdb.resolve_show_smart("k", "狐妖小红娘", files) or {}
+        check("优先选中「狐妖小红娘 黄风岭篇」", hit.get("id") == 336065, hit)
+        check("季号取篇名匹配的那一季（S13）", hit.get("season") == 13, hit)
+        check("命中方式是按篇名搜", hit.get("by") == "pian_search", hit)
+
+        # 没有独立条目时，选分季版而不是合并版（合并版把全部篇压成 S01）
+        hit2 = tmdb.resolve_show_smart("k", "狐妖小红娘", ["狐妖小红娘 月红篇 03.mp4"]) or {}
+        check("分季版优先于合并版", hit2.get("id") == 337569, hit2)
+        check("分季版里按季名取季号（月红篇 → S8）", hit2.get("season") == 8, hit2)
+
+        # 没有篇名：行为与 resolve_show 一致（精确同名优先）
+        hit3 = tmdb.resolve_show_smart("k", "狐妖小红娘", ["狐妖小红娘.01.mp4"]) or {}
+        check("无篇名时精确同名优先", hit3.get("id") == 75787, hit3)
+        check("无篇名时与 resolve_show 一致",
+              hit3.get("id") == tmdb.resolve_show("k", "狐妖小红娘"), hit3)
+        check("无篇名时不猜季号", hit3.get("season") is None, hit3)
+
+        # 端到端：季号取 TMDB 篇名对应的季（S13），集号取文件名（13）。
+        # 与 ai_analyze 同序：{SXX} 先用目标季号替换 → mr.sub → 补零 → 可信集号改写
+        mr = MagicRename()
+        mr.set_taskname("狐妖小红娘")
+        _tpl = "{TASKNAME}.{SXX}E{E}.{EXT}".replace("{SXX}", "S%02d" % hit["season"])
+        raw = mr.sub(r".*\.(mp4)$", _tpl, f13)
+        check("mr.sub 会把日期当集号（E10，正是要修的故障）",
+              raw == "狐妖小红娘.S13E10.mp4", raw)
+        final, _trust, _src = run._apply_trusted_episode(
+            re.sub(r"([Ss]\d\d[Ee])(\d)(?!\d)", r"\g<1>0\2", raw), f13)
+        check("最终文件名 狐妖小红娘.S13E13.mp4",
+              final == "狐妖小红娘.S13E13.mp4", final)
+    finally:
+        tmdb._request = real_request
+        tmdb._cache.clear()
+
+
 def main():
     mr = MagicRename()
     mr.set_taskname("背着善宰跑")
@@ -898,6 +1251,10 @@ def main():
     test_season_from_share()
     test_multi_season_and_aux()
     test_movie_mode()
+    test_custom_categories()
+    test_pattern_presets()
+    test_anime_episode()
+    test_tmdb_show_pick()
 
     print("\n结果: %d 通过, %d 失败" % (_passed, _failed))
     return 1 if _failed else 0

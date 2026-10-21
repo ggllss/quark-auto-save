@@ -262,14 +262,168 @@ def resolve_show(api_key, taskname):
     return shows[0]["id"]
 
 
-def season_map_for_show(api_key, taskname, filenames, season):
+# 「篇名」：狐妖小红娘 的「下沙篇」「黄风岭篇」、斗罗大陆 的「海神篇」…
+# 分季版条目靠它区分季，主条目则把全部篇合成一季
+_PIAN_RE = re.compile(r"[\u4e00-\u9fa5]{2,6}篇")
+# 「第 1 季」「Season 1」「S1」这种通用季名不算分季版的篇名
+_PLAIN_SEASON_RE = re.compile(
+    r"^(?:第\s*[0-9一二三四五六七八九十百]+\s*季|Season\s*\d+|S\d+)$", re.I
+)
+
+
+def pian_from_filenames(filenames):
+    """从一批文件名里取篇名（黄风岭篇），多个取众数；取不到返回空串"""
+    votes, order = {}, {}
+    for fn in filenames or []:
+        for m in _PIAN_RE.finditer(str(fn or "")):
+            name = m.group()
+            votes[name] = votes.get(name, 0) + 1
+            order.setdefault(name, len(order))
+    if not votes:
+        return ""
+    return max(votes.items(), key=lambda kv: (kv[1], -order[kv[0]]))[0]
+
+
+def show_season_list(api_key, tv_id):
+    """某部剧的季列表：[{number, name, episode_count, air_date}]（不含特辑季）"""
+
+    def go():
+        data = _request(api_key, "/3/tv/%s" % tv_id)
+        rows = []
+        for season in data.get("seasons") or []:
+            number = season.get("season_number")
+            if not isinstance(number, int) or number < 1:
+                continue
+            rows.append(
+                {
+                    "number": number,
+                    "name": season.get("name") or "",
+                    "episode_count": season.get("episode_count") or 0,
+                    "air_date": season.get("air_date") or "",
+                }
+            )
+        return rows
+
+    return _cached(("tv_seasons", tv_id), go)
+
+
+def _season_for_pian(api_key, tv_id, pian):
+    """条目里季名就是篇名的那一季（黄风岭篇 → S13）；整部只有一季时就用它"""
+    try:
+        seasons = show_season_list(api_key, tv_id)
+    except Exception:  # noqa: BLE001 - 查不到季就当没有
+        return None
+    if pian:
+        for season in seasons:
+            if pian in (season.get("name") or ""):
+                return season["number"]
+    with_eps = [s for s in seasons if s.get("episode_count")]
+    if len(with_eps) == 1:
+        return with_eps[0]["number"]
+    return None
+
+
+def _pian_season_score(api_key, tv_id):
+    """候选评分：季名里非「第 N 季」形态的数量（分季版 > 合并版）"""
+    try:
+        seasons = show_season_list(api_key, tv_id)
+    except Exception:  # noqa: BLE001
+        return 0
+    score = 0
+    for season in seasons:
+        name = (season.get("name") or "").strip()
+        if not name or _PLAIN_SEASON_RE.match(name):
+            continue
+        score += 1
+    return score
+
+
+def resolve_show_smart(api_key, taskname, filenames=None):
+    """
+    挑 TMDB 条目，兼顾「分篇」剧集。返回 {id, name, season, pian, by}。
+
+    「狐妖小红娘」主条目把全部篇合成 S01 共 183 集，日期反查会把
+    2026-09-11 映射成 E168；真正的黄风岭篇另有条目（S13，16 集），
+    或挂在分季版的 S13 下。季号取条目里与篇名匹配的那一季。
+    """
+    if not api_key or not taskname:
+        return None
+    pian = pian_from_filenames(filenames)
+    if pian.startswith(taskname):
+        # 文件名里剧名和篇名连写时（狐妖小红娘黄风岭篇），别把剧名再拼一遍
+        pian = pian[len(taskname):] or pian
+
+    # ① 按「剧名 篇名」直接搜，命中且条目名带篇名就采用
+    if pian:
+        try:
+            hits = search_series(api_key, "%s %s" % (taskname, pian))
+        except Exception:  # noqa: BLE001 - 网络问题退回旧口径
+            hits = []
+        for hit in hits:
+            if pian in (hit.get("name") or ""):
+                return {
+                    "id": hit.get("id"),
+                    "name": hit.get("name") or "",
+                    "season": _season_for_pian(api_key, hit.get("id"), pian),
+                    "pian": pian,
+                    "by": "pian_search",
+                }
+
+    # ② 按剧名搜全部候选，优先选分季版（季名是篇名的多者优先，并列保持原顺序）
+    try:
+        cands = search_series(api_key, taskname) or []
+    except Exception:  # noqa: BLE001
+        cands = []
+    if pian and cands:
+        best, best_score = None, 0
+        for cand in cands[:5]:
+            tv_id = cand.get("id")
+            if not tv_id:
+                continue
+            score = _pian_season_score(api_key, tv_id)
+            if score > best_score:
+                best, best_score = cand, score
+        if best:
+            return {
+                "id": best.get("id"),
+                "name": best.get("name") or "",
+                "season": _season_for_pian(api_key, best.get("id"), pian),
+                "pian": pian,
+                "by": "season_name",
+            }
+
+    # ③ 都失败：退回 resolve_show 的老口径（精确同名优先，否则第一条）
+    for cand in cands:
+        if (cand.get("name") or "") == taskname:
+            return {
+                "id": cand.get("id"),
+                "name": cand.get("name") or "",
+                "season": None,
+                "pian": pian,
+                "by": "name",
+            }
+    if not cands:
+        return None
+    first = cands[0]
+    return {
+        "id": first.get("id"),
+        "name": first.get("name") or "",
+        "season": None,
+        "pian": pian,
+        "by": "first",
+    }
+
+
+def season_map_for_show(api_key, taskname, filenames, season, tv_id=None):
     """
     正片的集号：按文件名里的日期 / 期号 / 上下集，匹配该季的真实集号
     （例如「第2期上」在 TMDB 是 S04E03）。返回 {文件名: 集号}。
+
+    tv_id 由 resolve_show_smart 给出时直接用它，不再按名字猜条目。
     """
     if not api_key or not filenames or not season:
         return {}
-    tv_id = resolve_show(api_key, taskname)
+    tv_id = tv_id or resolve_show(api_key, taskname)
     if not tv_id:
         return {}
     try:
@@ -284,11 +438,12 @@ def season_map_for_show(api_key, taskname, filenames, season):
     return out
 
 
-def specials_for_show(api_key, taskname, filenames, season=None):
+def specials_for_show(api_key, taskname, filenames, season=None, tv_id=None):
     """
     一次性把一批花絮文件映射到 TMDB 特辑季集号。
 
     返回 {文件名: {number, name, air_date, by}}，失败时返回 {}。
+    tv_id 由 resolve_show_smart 给出时也参与比较（它常常就是正主）。
     """
     if not api_key or not filenames:
         return {}
@@ -301,6 +456,8 @@ def specials_for_show(api_key, taskname, filenames, season=None):
     except Exception:  # noqa: BLE001
         cands = []
     ids = [c.get("id") for c in cands[:4] if c.get("id")]
+    if tv_id and tv_id not in ids:
+        ids.insert(0, tv_id)
     if not ids:
         rid = resolve_show(api_key, taskname)
         ids = [rid] if rid else []
@@ -322,7 +479,7 @@ def specials_for_show(api_key, taskname, filenames, season=None):
     return out
 
 
-def seasons_for_show(api_key, name):
+def seasons_for_show(api_key, name, tv_id=None):
     """
     这部剧有哪些季（返回季号列表，按播出时间从早到晚）。
 
@@ -331,7 +488,7 @@ def seasons_for_show(api_key, name):
     """
     if not api_key or not name:
         return []
-    tv_id = resolve_show(api_key, name)   # 返回的是剧集 id（int）
+    tv_id = tv_id or resolve_show(api_key, name)   # 返回的是剧集 id（int）
     if not tv_id:
         return []
 
@@ -351,7 +508,7 @@ def seasons_for_show(api_key, name):
     return _cached(("seasons", tv_id), _fetch)
 
 
-def season_for_date(api_key, name, date):
+def season_for_date(api_key, name, date, tv_id=None):
     """
     某个播出日期属于第几季（返回季号）。
 
@@ -360,10 +517,10 @@ def season_for_date(api_key, name, date):
     """
     if not api_key or not name or not date:
         return None
-    tv_id = resolve_show(api_key, name)
+    tv_id = tv_id or resolve_show(api_key, name)
     if not tv_id:
         return None
-    for season in reversed(seasons_for_show(api_key, name)):
+    for season in reversed(seasons_for_show(api_key, name, tv_id=tv_id)):
         try:
             episodes = season_episodes(api_key, tv_id, season)
         except Exception:  # noqa: BLE001
@@ -374,11 +531,11 @@ def season_for_date(api_key, name, date):
     return None
 
 
-def episode_for_date(api_key, name, season, date):
+def episode_for_date(api_key, name, season, date, tv_id=None):
     """某一季里某个播出日期对应第几集"""
     if not api_key or not name or not season or not date:
         return None
-    tv_id = resolve_show(api_key, name)
+    tv_id = tv_id or resolve_show(api_key, name)
     if not tv_id:
         return None
     try:
@@ -581,26 +738,29 @@ def movie_year(api_key, title):
 _picked_show = {}   # (剧名, 季) → 命中的 TMDB 剧集 id
 
 
-def episode_for_date_any(api_key, name, season, date):
+def episode_for_date_any(api_key, name, season, date, tv_id=None):
     return _cached(
-        ("ep_any", name, season, date),
-        lambda: _episode_for_date_any(api_key, name, season, date),
+        ("ep_any", name, season, date, tv_id),
+        lambda: _episode_for_date_any(api_key, name, season, date, tv_id),
     )
 
 
-def _episode_for_date_any(api_key, name, season, date):
+def _episode_for_date_any(api_key, name, season, date, tv_id=None):
     """
     在搜索结果的**多个候选剧集**里，找哪个的该季包含这个播出日期。
 
     resolve_show 只按名字取最像的一个，容易匹配到衍生节目：
     「五哈」会命中「五哈和他们的朋友」（12 集，没有 06-28），
     而真正在更新的是「哈哈哈哈哈」（36 集，06-28 是 E23）。
+
+    tv_id 由 resolve_show_smart 给出时只查这一个条目——它已经按篇名
+    挑过了（狐妖小红娘 → 黄风岭篇），再撒网反而会落回合并版条目。
     """
     if not api_key or not name or not season or not date:
         return None
     # 一旦某个日期命中了某部剧，就锁定它：同一分享里后面几十个日期
     # 只查这一部，不用每次把 4 个候选都试一遍（实测能把冷启动从 45s 压到 10s 内）
-    pinned = _picked_show.get((name, season))
+    pinned = tv_id or _picked_show.get((name, season))
     if pinned:
         candidates = [{"id": pinned, "name": ""}]
     else:

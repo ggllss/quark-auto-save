@@ -134,6 +134,40 @@ def extract_json(text):
 
 
 # --------------------------------------------------------------------------
+# 媒体类型：内置五个永远存在，ai.categories 只用来追加自定义类型
+# --------------------------------------------------------------------------
+
+MEDIA_TYPES = ["电视剧", "电影", "动漫", "综艺", "纪录片"]
+MAX_CATEGORY_LEN = 10   # 单项名称长度上限（要当目录名用）
+MAX_CATEGORIES = 12     # 类型总数上限
+
+
+def normalize_categories(raw):
+    """
+    配置里的类型列表 → 实际生效的类型列表（并集清理）。
+    内置五个固定排在最前，配置里的额外项按顺序追加；
+    去空、去首尾空白、去重、过滤含路径分隔符的名称、单项截断、总数封顶。
+    """
+    out = list(MEDIA_TYPES)
+    seen = set(out)
+    if isinstance(raw, str):
+        raw = [raw]
+    for item in (raw or []):
+        if not isinstance(item, str):
+            continue
+        name = item.strip()[:MAX_CATEGORY_LEN].strip()
+        if not name or name in seen:
+            continue
+        if "/" in name or "\\" in name:
+            continue
+        seen.add(name)
+        out.append(name)
+        if len(out) >= MAX_CATEGORIES:
+            break
+    return out
+
+
+# --------------------------------------------------------------------------
 # ① 意图解析：自然语言 → 结构化检索意图
 # --------------------------------------------------------------------------
 
@@ -151,27 +185,40 @@ _PARSE_SYSTEM = """你是影视资源检索助手。用户会给你一句想追�
 规则：
 - title 只保留剧名主体，例如「现在就出发 第四季」→ title 为「现在就出发」，season 为 4。
 - season 识别不到就填 null。
-- category 只能从这五个里选一个：电影、电视剧、动漫、综艺、纪录片。按剧名判断：
+- category 只能从这几种里选一个：%(categories)s。按剧名判断：
   动画/番剧/国漫/日漫类选「动漫」；真人连续剧、韩剧、美剧选「电视剧」；
   单部影片选「电影」；真人秀、脱口秀、竞技、访谈、真人户外类选「综艺」；
-  自然/历史/科学纪实类选「纪录片」。拿不准时选「电视剧」。
+  自然/历史/科学纪实类选「纪录片」。拿不准时选「电视剧」。%(extra_rule)s
 - queries 要包含「剧名+季」和「剧名」两种，供搜索接口多次尝试。
 - 只输出 JSON。"""
 
 
-def parse_intent(keyword, client=None):
+def parse_system_prompt(categories=None):
+    """拼装意图解析的 system 提示：允许的类型列表按配置动态生成"""
+    names = normalize_categories(categories)
+    extra = [n for n in names if n not in MEDIA_TYPES]
+    extra_rule = ""
+    if extra:
+        extra_rule = ("\n  自定义类型（%s）都按「电视剧」的规则处理：真人连续剧、短剧类归到它。"
+                      % "、".join(extra))
+    return _PARSE_SYSTEM % {"categories": "、".join(names), "extra_rule": extra_rule}
+
+
+def parse_intent(keyword, client=None, categories=None):
     """
     解析用户输入。AI 不可用时走本地规则，保证功能可用。
+    categories 为生效的类型列表（内置五个 + 自定义），缺省只用内置五个。
     返回 {title, season, aliases, queries, source}
     """
     keyword = (keyword or "").strip()
     if not keyword:
         return {"title": "", "season": None, "aliases": [], "queries": [], "source": "empty"}
 
+    allowed = normalize_categories(categories)
     if client is not None and client.ready:
         try:
-            raw = client.chat_json(_PARSE_SYSTEM, keyword, temperature=0)
-            intent = _normalize_intent(raw, keyword)
+            raw = client.chat_json(parse_system_prompt(allowed), keyword, temperature=0)
+            intent = _normalize_intent(raw, keyword, allowed)
             intent["source"] = "ai"
             return intent
         except Exception:  # noqa: BLE001 - 降级
@@ -232,7 +279,7 @@ def fallback_parse_intent(keyword):
     }
 
 
-def _normalize_intent(raw, keyword):
+def _normalize_intent(raw, keyword, categories=None):
     """把模型返回规整成固定结构"""
     if not isinstance(raw, dict):
         raise AIError("意图解析返回结构异常")
@@ -245,7 +292,7 @@ def _normalize_intent(raw, keyword):
         season = None
 
     category = str(raw.get("category") or "").strip()
-    if category not in MEDIA_TYPES:
+    if category not in normalize_categories(categories):
         category = ""
 
     # 模型有时把数组字段返回成字符串（"queries": "剧名 第1季"），
@@ -282,8 +329,6 @@ def _normalize_intent(raw, keyword):
 # --------------------------------------------------------------------------
 # ①-b 媒体类型与目标文件夹匹配
 # --------------------------------------------------------------------------
-
-MEDIA_TYPES = ["电视剧", "电影", "动漫", "综艺", "纪录片"]
 
 # 分类关键词（无 AI 时的启发式兜底，拿不准返回空串由调用方决定默认值）
 _CATEGORY_HINTS = [

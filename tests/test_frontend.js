@@ -268,6 +268,29 @@ async function testAiFlow() {
   await tick();
   check('选预设带出替换模板', ctx.aiForm.replace === '{TASKNAME}.{SXX}E{E}.{EXT}', ctx.aiForm.replace);
   check('选预设触发重新分析', calls.some(c => c[1] === '/ai/analyze'));
+
+  // 换链接/改类型时必须「先解析出规则预设，再分析」——并行会让列表沿用上一部剧的规则
+  calls.length = 0;
+  ctx.aiForm.pattern = '$TV_MAGIC';
+  ctx.aiPatternTouched = true;          // 假装上一部剧手动选过
+  global.__nextResponse = {
+    data: { success: true, data: {
+      category: '综艺', season: 5, savepath: '/0-影音/综艺/五.哈（2025）/S05',
+      folder_exists: true, season_dir: 'S05',
+      suggested_pattern: '$SHOW_MAGIC', suggested_replace: '{TASKNAME}.E{II}.第{E}期{PART}.{EXT}',
+      rows: [], stats: {}, rule: { valid: true }, dir_files: [],
+    } }
+  };
+  ctx.aiSelectIndex(0);
+  await tick();
+  await tick();
+  const iResolve = calls.findIndex(c => c[1] === '/ai/resolve_path');
+  const iAnalyze = calls.findIndex(c => c[1] === '/ai/analyze');
+  check('切链接时先解析再分析（顺序不能反）',
+    iResolve >= 0 && iAnalyze > iResolve, calls.map(c => c[1]));
+  check('切链接后规则预设按新类型换掉', ctx.aiForm.pattern === '$SHOW_MAGIC', ctx.aiForm.pattern);
+  check('切链接后模板跟着换',
+    ctx.aiForm.replace === '{TASKNAME}.E{II}.第{E}期{PART}.{EXT}', ctx.aiForm.replace);
 }
 
 async function testFetchDataNormalize() {
@@ -628,12 +651,12 @@ async function testMobileInteraction() {
   ctx.aiPatternTouched = false;
   ctx.aiForm.pattern = '$TV_MAGIC';
   ctx.aiApplyResolved({ category: '综艺', season: 4, savepath: '/x/S04',
-                        suggested_pattern: '$ZONGYI_MAGIC', suggested_replace: 'Z' });
-  check('搜到综艺时自动换成综艺规则', ctx.aiForm.pattern === '$ZONGYI_MAGIC', ctx.aiForm.pattern);
+                        suggested_pattern: '$SHOW_MAGIC', suggested_replace: 'Z' });
+  check('搜到综艺时自动换成综艺规则', ctx.aiForm.pattern === '$SHOW_MAGIC', ctx.aiForm.pattern);
   ctx.aiPatternTouched = true;   // 用户手动改过
   ctx.aiApplyResolved({ category: '电视剧', season: 2, savepath: '/y/S02',
                         suggested_pattern: '$TV_MAGIC', suggested_replace: 'T' });
-  check('用户手动选过预设就不再被覆盖', ctx.aiForm.pattern === '$ZONGYI_MAGIC', ctx.aiForm.pattern);
+  check('用户手动选过预设就不再被覆盖', ctx.aiForm.pattern === '$SHOW_MAGIC', ctx.aiForm.pattern);
   ctx.aiPatternTouched = false;
 
   // 「花絮素材 →」只能贴在花絮行上；多季的正片行要显示「分季 →」

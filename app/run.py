@@ -183,6 +183,8 @@ def get_data():
         return jsonify({"success": False, "message": "未登录"})
     data = Config.read_json(CONFIG_PATH)
     del data["webui"]
+    # 内置规则预设随配置一起下发（同名键保留配置里的值），前端下拉才看得到
+    data["magic_regex"] = _merge_magic_presets(data.get("magic_regex"))
     # AI 的 API Key 不回传给前端，只告知是否已配置
     ai_cfg = data.get("ai")
     if isinstance(ai_cfg, dict):
@@ -699,7 +701,103 @@ def ai_test():
 # AI 追剧：媒体类型与入库路径解析
 # --------------------------------------------------------------------------
 
-_TYPE_NAMES = ["电视剧", "电影", "动漫", "综艺", "纪录片"]
+# 默认值（内置五个）由 ai.MEDIA_TYPES 单点维护，这里只做并集解析，不再写死第二份
+# 内置类型的语义分组：只有电视剧/动漫走季推断，纪录片与电影、综艺一样不套 S0X
+_SERIES_TYPES = ("电视剧", "动漫")
+_NON_SERIES_TYPES = ("电影", "综艺", "纪录片")
+
+
+def _type_names():
+    """生效的类型列表：内置五个固定在最前，ai.categories 里的额外项按顺序追加"""
+    return ai.normalize_categories((config_data.get("ai") or {}).get("categories"))
+
+
+def _is_movie_type(category):
+    """电影：按「片名 (年份)」建目录，没有季集"""
+    return category == "电影"
+
+
+def _is_variety_type(category):
+    """综艺：期号算术（第N期上/下 → E 号），文件名模板不带 Sxx"""
+    return category == "综艺"
+
+
+def _is_series_type(category):
+    """
+    是否按剧集处理（做季推断、文件名带 Sxx）。
+    内置的电视剧/动漫是；纪录片、电影、综艺不是；用户新增的类型一律按剧集算。
+    """
+    if not category:
+        return False
+    if category in _SERIES_TYPES:
+        return True
+    if category in _NON_SERIES_TYPES:
+        return False
+    return True
+
+
+# 内置规则预设：按媒体类型命名，注入 magic_regex 后前端下拉就能直接选。
+# 配置里已有同名键时保留配置的值（用户可以覆盖），只补缺的。
+_BUILTIN_MAGIC_PRESETS = {
+    "$TV_MAGIC": {
+        "pattern": r".*\.(mp4|mkv|mov|m4v|avi|mpeg|ts)$",
+        "replace": "{TASKNAME}.{SXX}E{E}.{EXT}",
+    },
+    "$SHOW_MAGIC": {
+        "pattern": r"^(?!.*纯享)(?!.*加更)(?!.*抢先)(?!.*预告).*?第\d+期.*",
+        "replace": "{TASKNAME}.E{II}.第{E}期{PART}.{EXT}",
+    },
+    "$MOVIE_MAGIC": {
+        "pattern": r".*\.(mp4|mkv|mov|m4v|avi|ts)$",
+        "replace": "{TASKNAME}.{YEAR}.{EXT}",
+    },
+}
+
+# 类型 → 规则预设的默认映射；表里没有的类型（含用户新增的类型）一律回落 $TV_MAGIC
+_DEFAULT_PATTERN_MAP = {
+    "综艺": "$SHOW_MAGIC",
+    "电影": "$MOVIE_MAGIC",
+    "纪录片": "$TV_MAGIC",
+}
+_FALLBACK_PATTERN = "$TV_MAGIC"
+
+
+def _merge_magic_presets(presets):
+    """内置预设 + 配置值：同名键保留配置里的值（用户可覆盖），缺的才补进来"""
+    merged = dict(presets) if isinstance(presets, dict) else {}
+    for name, preset in _BUILTIN_MAGIC_PRESETS.items():
+        if not isinstance(merged.get(name), dict):
+            merged[name] = dict(preset)
+    return merged
+
+
+def _ensure_magic_presets():
+    """把内置预设注入进程内的 config_data，返回合并后的 magic_regex"""
+    config_data["magic_regex"] = _merge_magic_presets(config_data.get("magic_regex"))
+    return config_data["magic_regex"]
+
+
+def _pattern_map():
+    """类型 → 规则预设的生效映射：默认表打底，配置 ai.pattern_map 里的条目覆盖同名类型"""
+    merged = dict(_DEFAULT_PATTERN_MAP)
+    configured = (config_data.get("ai") or {}).get("pattern_map")
+    if isinstance(configured, dict):
+        for name, preset in configured.items():
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if not isinstance(preset, str) or not preset.strip():
+                continue
+            merged[name.strip()] = preset.strip()
+    return merged
+
+
+def _suggest_pattern(category):
+    """按类型给出规则预设名；映射里没有的类型、或指向的预设不存在时回落 $TV_MAGIC"""
+    presets = _ensure_magic_presets()
+    name = _pattern_map().get((category or "").strip()) or _FALLBACK_PATTERN
+    if name not in presets:
+        name = _FALLBACK_PATTERN
+    return name if name in presets else ""
 
 
 def _infer_media_roots():
@@ -709,19 +807,20 @@ def _infer_media_roots():
     其余类型用同一父目录（/0-影音）补齐，这样开箱即可用。
     """
     found, base = {}, ""
+    names = _type_names()
     for task in (config_data.get("tasklist") or []):
         if not isinstance(task, dict):
             continue
         segments = [s for s in (task.get("savepath") or "").strip().split("/") if s]
         for i, seg in enumerate(segments):
-            if seg in _TYPE_NAMES:
+            if seg in names:
                 found.setdefault(seg, "/" + "/".join(segments[: i + 1]))
                 if i > 0 and not base:
                     base = "/" + "/".join(segments[:i])
                 break
     if not found:
         return {}
-    return {n: (found.get(n) or ((base + "/" + n) if base else "")) for n in _TYPE_NAMES}
+    return {n: (found.get(n) or ((base + "/" + n) if base else "")) for n in names}
 
 
 def _media_roots():
@@ -731,7 +830,7 @@ def _media_roots():
     if isinstance(configured, dict):
         roots = {k: (v or "").strip() for k, v in configured.items() if (v or "").strip()}
     inferred = _infer_media_roots()
-    for name in _TYPE_NAMES:
+    for name in _type_names():
         if not roots.get(name) and inferred.get(name):
             roots[name] = inferred[name]
     return roots
@@ -767,7 +866,7 @@ def _resolve_media_path(title, aliases=None, season=None, category=""):
     season_in_name, style_stem = False, ""
     if not category and title:
         best_type = None
-        for name in _TYPE_NAMES:
+        for name in _type_names():
             root = roots.get(name)
             if not root:
                 continue
@@ -1065,6 +1164,7 @@ def ai_resolve_path():
     """按类型 + 剧名解析入库路径：命中已有文件夹，还是需要新建；分季是否要套 S0X"""
     if not is_login():
         return jsonify({"success": False, "message": "未登录"})
+    _ensure_magic_presets()
     body = request.json or {}
     title = (body.get("title") or "").strip()
     aliases = body.get("aliases") or []
@@ -1081,9 +1181,10 @@ def ai_resolve_path():
         data = _resolve_media_path(title, aliases, season, category)
     except Exception as e:
         return jsonify({"success": False, "message": f"解析入库路径失败：{e}"})
-    data["category_options"] = _TYPE_NAMES
+    data["category_options"] = _type_names()
     # 推荐规则预设：命中的任务优先（沿用它的命名习惯），
-    # 否则按类型选——综艺一期分上下集用 $ZONGYI_MAGIC，剧集用 $TV_MAGIC
+    # 否则按类型查 ai.pattern_map（综艺→$SHOW_MAGIC、电影→$MOVIE_MAGIC…），
+    # 表里没有的类型回落 $TV_MAGIC
     suggested = ""
     suggested_replace = ""
     try:
@@ -1094,13 +1195,9 @@ def ai_resolve_path():
     except Exception:  # noqa: BLE001
         pass
     if not suggested:
-        presets = config_data.get("magic_regex") or {}
-        cat = data.get("category") or category
-        if cat == "综艺" and "$ZONGYI_MAGIC" in presets:
-            suggested = "$ZONGYI_MAGIC"
-        elif "$TV_MAGIC" in presets:
-            suggested = "$TV_MAGIC"
+        suggested = _suggest_pattern(data.get("category") or category)
         if suggested:
+            presets = _ensure_magic_presets()
             suggested_replace = (presets.get(suggested) or {}).get("replace") or ""
     data["suggested_pattern"] = suggested
     data["suggested_replace"] = suggested_replace
@@ -1118,8 +1215,10 @@ def ai_search():
         return jsonify({"success": False, "message": "请输入剧集名称"})
 
     client = _ai_client()
+    # 生效的类型列表（内置五个 + 自定义）传给解析器，模型才认得自定义类型
+    _cats = _type_names()
     # ① 代码先算（瞬时）：拆季号、剥年份、生成检索词
-    intent = ai.parse_intent(keyword, None)
+    intent = ai.parse_intent(keyword, None, _cats)
     # ② 类型和中英别名交给 TMDB（一次查询、缓存 1 小时），比模型稳定
     _tmdb_key = (config_data.get("tmdb") or {}).get("api_key") or ""
     if _tmdb_key and intent.get("title"):
@@ -1161,12 +1260,12 @@ def ai_search():
         )
     )
     if _need_ai:
-        intent = ai.parse_intent(keyword, client)
+        intent = ai.parse_intent(keyword, client, _cats)
     # TMDB 别名没拿到时，让模型补一次（罕见）：中文片名拿不到英文别名，
     # 英文标题的分享就会被相关性过滤整批挡掉，用户看到「0 条」。
     elif not intent.get("aliases") and client is not None and getattr(client, "ready", False):
         try:
-            _ai_intent = ai.parse_intent(keyword, client)
+            _ai_intent = ai.parse_intent(keyword, client, _cats)
             _extra = [
                 a for a in (_ai_intent.get("aliases") or [])
                 if a and len(a) >= 3 and a.lower() != (intent.get("title") or "").lower()
@@ -1493,29 +1592,143 @@ def _expand_share_files_smart(account, pwd_id, stoken, root_fid="", max_files=60
     return keep, truncated
 
 
+# 方括号里的技术规格词：命中就说明整段不是集号
+_TECH_TAG_RE = re.compile(
+    r"4k|2160p|1080p|720p|hevc|x265|x264|h264|avc|aac|ac3|ddp|dts"
+    r"|web-?dl|bluray|hdr|dv|remux|flac|10bit|8bit|60fps",
+    re.I,
+)
+_CJK_RE = re.compile(r"[\u4e00-\u9fa5]")
+# 括号里只有一个日期/年份（2026.10.15、2026-10、2026）
+_PURE_DATE_RE = re.compile(r"^(?:19|20)\d{2}(?:[.\-_/]\d{1,2}){0,2}$")
+_BRACKET_RE = re.compile(r"[\[【(（]([^\[\]【】()（）]*)[\]】)）]")
+
+
+def _strip_tech_tags(name):
+    """
+    删掉方括号里的技术标签：[4K][HEVC,AAC][2026.10.15]、【1080p】、(2026)。
+
+    判定标准：括号内不含中日韩汉字，且命中技术词或是纯日期/年份。
+    含汉字的括号（【第13集】、[国语中字]）一律保留——那里面可能有真集号。
+    注意：_air_date 依赖方括号里的日期，清洗后的名字不要喂给它。
+    """
+
+    def _keep(m):
+        inner = (m.group(1) or "").strip()
+        if not inner or _CJK_RE.search(inner):
+            return m.group(0)
+        if _PURE_DATE_RE.match(inner) or _TECH_TAG_RE.search(inner):
+            return ""
+        return m.group(0)
+
+    return _BRACKET_RE.sub(_keep, str(name or ""))
+
+
+# 明确标记的集号，按可信度排序；裸数字不在其中（那只能算兜底）
+_STRICT_EP_PATTERNS = (
+    (r"[Ss]\d{1,2}[Ee](\d{1,3})(?!\d)", "SxxExx"),
+    (r"(?<![A-Za-z])[Ee][Pp](\d{1,3})(?!\d)", "EPxx"),
+    (r"(?<![A-Za-z])[Ee](\d{1,3})(?!\d)", "Exx"),
+    (r"第\s*(\d{1,3})\s*[集期话部篇]", "第N集"),
+    (r"篇\s*(\d{1,3})(?!\d)", "篇N"),
+)
+
+
+def _strict_episode(name):
+    """
+    文件名里「明确标记」的集号：(集号, 来源)；认不出返回 (None, "")。
+
+    只认 SxxExx / Exx / EPxx / 第N集|期|话|部|篇 / 篇N，不认裸数字：
+    「黄风岭篇 13」的 13 是集号，而「2026.10.15」里的 10 不是。
+    """
+    text = str(name or "")
+    for pattern, source in _STRICT_EP_PATTERNS:
+        m = re.search(pattern, text)
+        if not m:
+            continue
+        try:
+            return int(m.group(1)), source
+        except (TypeError, ValueError):
+            continue
+    return None, ""
+
+
+def _trusted_episode(name):
+    """文件名里的可信集号：先剔除技术标签再认，认不出退回原始文件名"""
+    for candidate in (_strip_tech_tags(name), name):
+        episode, source = _strict_episode(candidate)
+        if episode is not None:
+            return episode, source
+    return None, ""
+
+
+def _apply_trusted_episode(new_name, src_name):
+    """
+    用文件名里的明确集号改写 new_name 的 E 号，返回 (新名字, 可信集号, 来源)。
+
+    MagicRename 的 {E} 兜底规则会被日期截胡（[2026.10.15] → E10），
+    而「篇 13」「第13集」这种明确标记永远比裸数字可信。
+    先试「.E12」这种无季号的写法，不中再试「S13E12」。
+    """
+    trust, source = _trusted_episode(src_name)
+    if trust is None or not new_name:
+        return new_name, None, ""
+    m = re.search(r"[Ss]\d{2}[Ee](\d{1,3})", new_name) or re.search(
+        r"\.E(\d{1,3})", new_name
+    )
+    if not m or int(m.group(1)) == trust:
+        return new_name, trust, source
+    fixed = re.sub(r"\.E\d{1,3}", ".E%02d" % trust, new_name, count=1)
+    if fixed == new_name:
+        fixed = re.sub(
+            r"([Ss]\d{2})[Ee]\d{1,3}", r"\g<1>E%02d" % trust, new_name, count=1
+        )
+    return (fixed if fixed != new_name else new_name), trust, source
+
+
 def _extract_se(name, mr):
     """从文件名里提取 (季, 集)。提取不到返回 None。
 
-    复用 MagicRename 的 {S}/{E} 变量正则，保证与改名引擎口径一致。
+    先用剔除技术标签后的名字抽，抽不到再退回原始文件名：
+    MagicRename 的 {E} 兜底规则是「[._]数字[._]」，会把
+    「[4K][HEVC,AAC][2026.10.15]」里的 10 当成第 10 集。
+    「篇 13」「第13集」这类明确标记优先于任何裸数字兜底。
     """
     season = episode = None
-    for pattern in mr.magic_variable.get("{S}", []):
-        m = re.search(pattern, name)
-        if m:
-            try:
-                season = int(m.group())
-            except ValueError:
-                season = None
-            break
-    for pattern in mr.magic_variable.get("{E}", []):
-        m = re.search(pattern, name)
-        if m:
-            try:
-                episode = int(m.group())
-            except ValueError:
-                episode = None
+    for candidate in (_strip_tech_tags(name), name):
+        if season is None:
+            season = _match_season(candidate, mr)
+        if episode is None:
+            episode = _strict_episode(candidate)[0]
+        if episode is None:
+            episode = _match_episode(candidate, mr)
+        if season is not None and episode is not None:
             break
     return season, episode
+
+
+def _match_season(text, mr):
+    """按 MagicRename 的 {S} 变量正则取季号"""
+    for pattern in mr.magic_variable.get("{S}", []):
+        m = re.search(pattern, text)
+        if m:
+            try:
+                return int(m.group())
+            except ValueError:
+                return None
+    return None
+
+
+def _match_episode(text, mr):
+    """按 MagicRename 的 {E} 变量正则取集号（含裸数字兜底，不可信）"""
+    for pattern in mr.magic_variable.get("{E}", []):
+        m = re.search(pattern, text)
+        if m:
+            try:
+                return int(m.group())
+            except ValueError:
+                return None
+    return None
 
 
 # 花絮类素材：这些不是正片，统一收进 S00（Special 季），
@@ -1641,6 +1854,8 @@ def ai_analyze():
     """
     if not is_login():
         return jsonify({"success": False, "message": "未登录"})
+    # 内置预设要先在 magic_regex 里，用户选的 $XXX_MAGIC 才解析得开
+    _ensure_magic_presets()
     body = request.json or {}
     shareurl = (body.get("shareurl") or "").strip()
     savepath = (body.get("savepath") or "/").strip() or "/"
@@ -1652,11 +1867,11 @@ def ai_analyze():
     category = (body.get("category") or "").strip()
     if not category:
         _seg = savepath.strip("/").split("/")
-        for _name in _TYPE_NAMES:
+        for _name in _type_names():
             if _name in _seg:
                 category = _name
                 break
-    is_movie = category == "电影"
+    is_movie = _is_movie_type(category)
 
     if not shareurl:
         return jsonify({"success": False, "message": "缺少分享链接"})
@@ -1706,7 +1921,7 @@ def ai_analyze():
     season_note = ""
     # 剧集：文件名里有 E05 这种集号但没有季标记时按第 1 季处理
     # （Emby 对单季剧同样期望 Season 01 目录；综艺不套这条，季号来自库里）
-    if (not share_season and not is_movie and category in ("电视剧", "动漫")
+    if (not share_season and not is_movie and _is_series_type(category)
             and not re.search(r"[Ss]\d{1,2}", savepath.rstrip("/").rsplit("/", 1)[-1] or "")):
         # 「01.mp4」「14.mp4」这种纯数字也是集号，不能只认 E05
         _has_ep = any(
@@ -1826,16 +2041,40 @@ def ai_analyze():
         for f in share_list
         if not f.get("dir") and not _is_extra_file(f.get("file_name"))
     ]
+    tmdb_key = (
+        (config_data.get("tmdb") or {}).get("api_key")
+        or os.environ.get("TMDB_API_KEY")
+        or ""
+    )
+    # TMDB 条目选择：分享里有「XX篇」时挑「剧名 XX篇」或分季版里季名就是
+    # XX篇 的条目。主条目常把全部篇合成一季（狐妖小红娘 S01 共 183 集），
+    # 日期反查会把 2026-09-11 映射成 E168。季号取该条目里匹配篇名的那一季。
+    tmdb_show = {}
+    if tmdb_key and not is_movie:
+        try:
+            tmdb_show = tmdb.resolve_show_smart(tmdb_key, taskname, _main_files) or {}
+        except Exception:  # noqa: BLE001 - 查不到就用原来的口径
+            tmdb_show = {}
+    _show_id = tmdb_show.get("id")
+    _pian = tmdb_show.get("pian") or ""
+    _pian_season = tmdb_show.get("season")
+    if _pian_season:
+        _pick = "TMDB 命中「%s」的 %s（S%02d）" % (
+            tmdb_show.get("name") or "",
+            _pian or "该篇",
+            _pian_season,
+        )
+        season_note = (_pick if not season_note else season_note + "；" + _pick)
+
     season_map = {}
     if _main_files:
         try:
             season_map = tmdb.season_map_for_show(
-                (config_data.get("tmdb") or {}).get("api_key")
-                or os.environ.get("TMDB_API_KEY")
-                or "",
+                tmdb_key,
                 taskname,
                 _main_files,
-                _season_no,
+                _season_no or _pian_season,
+                tv_id=_show_id,
             )
         except Exception:  # noqa: BLE001 - 查不到就退回顺序号
             season_map = {}
@@ -1864,11 +2103,6 @@ def ai_analyze():
             _seq = max(_seq, int(_m.group(1)))
     # 花絮的集号按 TMDB 特辑季（Season 0）匹配：先按文件名里的日期找候选，
     # 再用期号/上下集/类型词打分。这是唯一能让 Emby/Jellyfin 正确刮削的编号。
-    tmdb_key = (
-        (config_data.get("tmdb") or {}).get("api_key")
-        or os.environ.get("TMDB_API_KEY")
-        or ""
-    )
     tmdb_map = {}
     if tmdb_key and _extras:
         try:
@@ -1879,6 +2113,7 @@ def ai_analyze():
                 taskname,
                 [f.get("file_name") or "" for f in _extras],
                 season=_season,
+                tv_id=_show_id,
             )
         except Exception:  # noqa: BLE001 - 查不到就退回期号
             tmdb_map = {}
@@ -2082,7 +2317,9 @@ def ai_analyze():
                     _d0 = _air_date(name, f.get("dir_path"))
                     if _d0:
                         try:
-                            row_season = tmdb.season_for_date(tmdb_key, taskname, _d0)
+                            row_season = tmdb.season_for_date(
+                                tmdb_key, taskname, _d0, tv_id=_show_id
+                            )
                         except Exception:  # noqa: BLE001
                             row_season = None
                         if row_season:
@@ -2114,6 +2351,10 @@ def ai_analyze():
                     _season_label = _t2.upper()
                 elif share_season:
                     _season_label = "S%02d" % share_season
+                elif _pian_season:
+                    # 目标路径没写 Sxx、分享里也没有季标记时，用 TMDB 篇名对应的季
+                    # （黄风岭篇 → S13）。不这样 {SXX} 解析不出来，只能落 S01。
+                    _season_label = "S%02d" % _pian_season
             row["season_label"] = _season_label
             if is_extra:
                 _hit = tmdb_map.get(name) or {}
@@ -2140,13 +2381,15 @@ def ai_analyze():
                     _ep = None
                     if tmdb_key and row_season:
                         try:
-                            _ep = tmdb.episode_for_date(tmdb_key, taskname, row_season, _air)
+                            _ep = tmdb.episode_for_date(
+                                tmdb_key, taskname, row_season, _air, tv_id=_show_id
+                            )
                         except Exception:  # noqa: BLE001
                             _ep = None
                     _ext2 = os.path.splitext(name)[1]
                     # 剧集要带 Sxx（S01E05 才是 Emby 认的写法），综艺按用户模板不带
                     _sw = row.get("season_label") or ""
-                    _is_tv = category in ("电视剧", "动漫") and _sw
+                    _is_tv = _is_series_type(category) and _sw
                     if _ep:
                         if _is_tv:
                             new_name = "%s.%sE%02d.%s%s" % (taskname, _sw, _ep, _air, _ext2)
@@ -2197,7 +2440,7 @@ def ai_analyze():
                     if _ep2:
                         _ext3 = os.path.splitext(name)[1]
                         _sw2 = row.get("season_label") or ""
-                        if category in ("电视剧", "动漫") and _sw2:
+                        if _is_series_type(category) and _sw2:
                             new_name = "%s.%sE%02d%s" % (taskname, _sw2, _ep2, _ext3)
                         else:
                             new_name = "%s.E%02d.第%d期%s" % (taskname, _ep2, _ep2, _ext3)
@@ -2216,6 +2459,17 @@ def ai_analyze():
             # 集号补零：S02E6 → S02E06（和库里其它文件保持一致）
             if new_name and not is_movie:
                 new_name = re.sub(r"([Ss]\d\d[Ee])(\d)(?!\d)", r"\g<1>0\2", new_name)
+            # 文件名里有明确集号（篇13 / 第13集 / SxxExx）时以它为准：
+            # MagicRename 的 {E} 兜底规则会被日期截胡（[2026.10.15] → E10）。
+            # 综艺不算：那里的「第N期」是期号不是集号，上下集的换算由
+            # 后面的期号算术专门处理，按文件名的期号改写只会把 E03 改回 E02。
+            if (new_name and not is_movie and not is_extra and not is_aux
+                    and not _is_variety_type(category)):
+                _fix_e, _trust, _tsrc = _apply_trusted_episode(new_name, name)
+                if _fix_e != new_name:
+                    new_name = _fix_e
+                    row["ep_from_mark"] = _trust
+                    row["ep_mark_source"] = _tsrc
             exists_orig = bool(mr.is_exists(name, cmp_names))
             exists_new = bool(mr.is_exists(new_name, cmp_names))
             row["new_name"] = new_name or name
@@ -2237,7 +2491,7 @@ def ai_analyze():
             # 再退回行内识别、分享识别——分享里的 Sxx 经常是垃圾值
             _tail_sp = savepath_norm.rstrip("/").rsplit("/", 1)[-1] or ""
             _sp_season = int(_tail_sp[1:]) if re.fullmatch(r"[Ss]\d{1,2}", _tail_sp) else None
-            _ep_season = row_season or _sp_season or share_season
+            _ep_season = row_season or _sp_season or share_season or _pian_season
             if not is_movie and not is_extra and _ep_season and tmdb_key:
                 _air_d = _air_date(name, f.get("dir_path"))
                 if _air_d:
@@ -2245,14 +2499,21 @@ def ai_analyze():
                         # 先在多个候选剧集里按日期反查（避免匹配到衍生节目），
                         # 查不到再退回按名字解析的那一个
                         _hit = tmdb.episode_for_date_any(
-                            tmdb_key, taskname, _ep_season, _air_d
+                            tmdb_key, taskname, _ep_season, _air_d, tv_id=_show_id
                         )
                         _ep_t = (_hit or {}).get("number") or tmdb.episode_for_date(
-                            tmdb_key, taskname, _ep_season, _air_d
+                            tmdb_key, taskname, _ep_season, _air_d, tv_id=_show_id
                         )
                     except Exception:  # noqa: BLE001
                         _ep_t = None
-                    if _ep_t:
+                    # 文件名带明确集号时它比 TMDB 可信：合并版条目把全部篇
+                    # 合成 S01（183 集），日期反查会把 2026-09-11 映射成 E168。
+                    # 综艺例外——它的「第N期」不是集号，见上面的期号算术。
+                    _trust_t, _ = _trusted_episode(name)
+                    if (_ep_t and _trust_t is not None and _trust_t != _ep_t
+                            and not _is_variety_type(category)):
+                        row["ep_conflict"] = "文件名%d / TMDB%d" % (_trust_t, _ep_t)
+                    elif _ep_t:
                         _fixed = re.sub(
                             r"([Ss]\d{2})[Ee]\d{1,3}", r"\g<1>E%02d" % _ep_t, row["new_name"]
                         )
@@ -2381,7 +2642,7 @@ def ai_analyze():
 
     # 综艺正片集号：第N期上 = (N-1)*2+1，第N期下 = (N-1)*2+2。
     # 这是确定的算术关系，不该依赖 TMDB（之前绕去查 TMDB，查错剧就算成 E19）。
-    if category == "综艺":
+    if _is_variety_type(category):
         # 先按「季」判断这一季有没有上下集：
         # 有上下集 → 每期占 2 个编号（第N期上=(N-1)*2+1，下=+2）
         # 没上下集 → 期号就是集号（第12期=E12）
@@ -2428,7 +2689,7 @@ def ai_analyze():
 
     # 同一季里同时存在「整期」和「上/下集」时：保留上下集，整期标为重复。
     # （用户选择：上下集是拆分后的完整内容，整期属于重复）
-    if category == "综艺":
+    if _is_variety_type(category):
         _split_periods = {}
         for _r in rows:
             if _r.get("aux") or _r.get("dir") or _r.get("is_extra"):
@@ -3130,6 +3391,8 @@ def init():
     Config.breaking_change_update(config_data)
     if not config_data.get("magic_regex"):
         config_data["magic_regex"] = MagicRename().magic_regex
+    # 内置规则预设补进来（配置里同名键保留用户的值）：定时任务用的也是这份
+    _ensure_magic_presets()
 
     # 默认管理账号
     config_data["webui"] = {

@@ -411,12 +411,25 @@
                       </div>
                       <input type="text" class="form-control" v-model="formData.ai.media_roots[t]"
                              :placeholder="'/0-影音/' + t">
+                      <div class="input-group-append" v-if="!aiIsBuiltinCategory(t)">
+                        <button type="button" class="btn btn-outline-danger" title="删除该类型"
+                                @click="aiRemoveCategory(t)">×</button>
+                      </div>
                     </div>
+                  </div>
+                </div>
+                <div class="input-group input-group-sm mb-1" style="max-width:320px">
+                  <input type="text" class="form-control" v-model="aiNewCategory" maxlength="10"
+                         placeholder="新增类型（如 短剧）" @keyup.enter="aiAddCategory()">
+                  <div class="input-group-append">
+                    <button type="button" class="btn btn-outline-primary" @click="aiAddCategory()">新增类型</button>
                   </div>
                 </div>
                 <small class="text-muted">
                   分析链接后按类型到对应目录下找同名文件夹：<b>找到就存进去</b>，找不到就新建（界面会明确标注「将新建」）；
                   分季时在剧集文件夹下再套一层 <code>S0X</code>。留空则自动按现有任务的保存路径推断。
+                  内置的<b>电视剧 / 电影 / 动漫 / 综艺 / 纪录片</b>不可删除，新增的类型按「电视剧」的规则处理
+                  （做季推断、文件名带 <code>Sxx</code>）。
                 </small>
               </div>
             </div>
@@ -836,13 +849,13 @@
                   <div class="form-group mb-2">
                     <label class="small mb-0">剧名（用于重命名）</label>
                     <input type="text" class="form-control form-control-sm" v-model="aiForm.taskname"
-                           @change="aiResolvePath()">
+                           @change="aiResolveThenAnalyze()">
                   </div>
                 </div>
                 <div class="col-6 col-md-2">
                   <div class="form-group mb-2">
                     <label class="small mb-0">类型</label>
-                    <select class="form-control form-control-sm" v-model="aiForm.category" @change="aiResolvePath()">
+                    <select class="form-control form-control-sm" v-model="aiForm.category" @change="aiResolveThenAnalyze()">
                       <option v-for="t in aiCategoryOptions" :key="t" :value="t">{{ t }}</option>
                     </select>
                   </div>
@@ -851,7 +864,7 @@
                   <div class="form-group mb-2">
                     <label class="small mb-0">季号</label>
                     <input type="number" min="1" class="form-control form-control-sm" v-model.number="aiForm.season"
-                           @change="aiResolvePath()" placeholder="不分季留空">
+                           @change="aiResolveThenAnalyze()" placeholder="不分季留空">
                   </div>
                 </div>
                 <div class="col-12 col-md-4">
@@ -1317,6 +1330,33 @@
 
 
   <script>
+    // 内置类型：固定存在、不可删改；ai.categories 只用于追加自定义类型（与后端 ai.MEDIA_TYPES 一致）
+    var AI_BUILTIN_CATEGORIES = ['电视剧', '电影', '动漫', '综艺', '纪录片'];
+    var AI_CATEGORY_MAX_LEN = 10;   // 要当目录名用，单项长度上限
+    var AI_CATEGORY_MAX = 12;       // 类型总数上限
+    // 类型 → 规则预设的默认映射（与后端 _DEFAULT_PATTERN_MAP 一致）；
+    // 表里没有的类型（含用户新增的类型）一律回落 $TV_MAGIC
+    var AI_PATTERN_MAP = { '综艺': '$SHOW_MAGIC', '电影': '$MOVIE_MAGIC', '纪录片': '$TV_MAGIC' };
+    var AI_PATTERN_FALLBACK = '$TV_MAGIC';
+
+    /**
+     * 配置里的类型列表 → 实际生效的类型列表：内置五个固定在前，额外项按顺序追加，
+     * 去空、去首尾空白、去重、过滤含路径分隔符的名称、单项截断、总数封顶。
+     */
+    function aiNormalizeCategories(raw) {
+      var out = AI_BUILTIN_CATEGORIES.slice();
+      if (!Array.isArray(raw)) return out;
+      raw.forEach(function (item) {
+        if (typeof item !== 'string') return;
+        var name = item.trim().slice(0, AI_CATEGORY_MAX_LEN).trim();
+        if (!name || out.indexOf(name) >= 0) return;
+        if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) return;
+        if (out.length >= AI_CATEGORY_MAX) return;
+        out.push(name);
+      });
+      return out;
+    }
+
     var app = new Vue({
       el: '#app',
       data: {
@@ -1403,7 +1443,9 @@
         aiSelectedCandidate: null,
         aiCandidateIndex: -1,
         aiBaselinePath: '',
-        aiCategoryOptions: ['电视剧', '电影', '动漫', '综艺', '纪录片'],
+        // 类型目录：内置五个兜底，真实列表由 fetchData 按 formData.ai.categories 覆盖
+        aiCategoryOptions: AI_BUILTIN_CATEGORIES.slice(),
+        aiNewCategory: '',
         // 手机端交互状态：设置折叠、候选列表收起、状态筛选
         aiSettingsOpen: false,
         aiCandidatesCollapsed: false,
@@ -1497,22 +1539,77 @@
           if (resolved.category) this.aiForm.category = resolved.category;
           if (resolved.category_options && resolved.category_options.length) {
             this.aiCategoryOptions = resolved.category_options;
+            // 后端新加的类型可能还没有目录输入框，先建好键
+            var roots = this.formData.ai.media_roots;
+            var self = this;
+            resolved.category_options.forEach(function (t) {
+              if (roots[t] === undefined) self.$set(roots, t, '');
+            });
           }
           this.aiForm.season = (resolved.season === null || resolved.season === undefined) ? '' : resolved.season;
           if (resolved.savepath) this.aiForm.savepath = resolved.savepath;
-          // 规则预设跟着内容走：综艺用 $ZONGYI_MAGIC、剧集用 $TV_MAGIC，
+          // 规则预设跟着内容走：综艺用 $SHOW_MAGIC、剧集用 $TV_MAGIC，
           // 命中已有任务时沿用它的命名习惯；用户手动选过就不再覆盖
           if (resolved.suggested_pattern && !this.aiPatternTouched) {
             this.aiForm.pattern = resolved.suggested_pattern;
             this.aiForm.replace = resolved.suggested_replace || '';
           }
         },
+        // 内置五个只有目录输入框，没有删除按钮
+        aiIsBuiltinCategory(t) {
+          return AI_BUILTIN_CATEGORIES.indexOf(t) >= 0;
+        },
+        // 新增自定义类型：只追加，内置五个不可删改
+        aiAddCategory() {
+          const name = (this.aiNewCategory || '').trim().slice(0, AI_CATEGORY_MAX_LEN).trim();
+          if (!name) return;
+          if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) {
+            this.showToast('类型名不能包含 / 或 \\', 'danger');
+            return;
+          }
+          if (this.aiCategoryOptions.indexOf(name) >= 0) {
+            this.showToast('类型「' + name + '」已存在', 'warning');
+            return;
+          }
+          if (this.aiCategoryOptions.length >= AI_CATEGORY_MAX) {
+            this.showToast('类型最多 ' + AI_CATEGORY_MAX + ' 个', 'warning');
+            return;
+          }
+          this.aiCategoryOptions.push(name);
+          this.formData.ai.categories = this.aiCategoryOptions.slice();
+          if (this.formData.ai.media_roots[name] === undefined) {
+            this.$set(this.formData.ai.media_roots, name, '');
+          }
+          this.aiNewCategory = '';
+        },
+        // 删除自定义类型（内置五个不在列表里出现删除按钮，这里再兜一道）
+        aiRemoveCategory(t) {
+          if (this.aiIsBuiltinCategory(t)) return;
+          this.aiCategoryOptions = this.aiCategoryOptions.filter(x => x !== t);
+          this.formData.ai.categories = this.aiCategoryOptions.slice();
+          if (this.aiForm.category === t) this.aiForm.category = '';
+        },
+        // 按类型挑规则预设：配置里的 ai.pattern_map 覆盖内置默认表，
+        // 表里没有的类型回落 $TV_MAGIC；预设不存在时返回 null（保留用户当前选择）
+        aiPatternFor(category) {
+          const presets = this.formData.magic_regex || {};
+          const configured = (this.formData.ai && this.formData.ai.pattern_map) || {};
+          const map = Object.assign({}, AI_PATTERN_MAP,
+            (configured && typeof configured === 'object') ? configured : {});
+          let name = map[(category || '').trim()] || AI_PATTERN_FALLBACK;
+          if (!presets[name] || typeof presets[name] !== 'object') name = AI_PATTERN_FALLBACK;
+          const preset = presets[name];
+          if (!preset || typeof preset !== 'object') return null;
+          return { pattern: name, replace: preset.replace || '' };
+        },
         // 类型或季号变化后重新解析入库位置
         aiResolvePath() {
           const title = (this.aiForm.taskname || '').trim() || (this.aiForm.keyword || '').trim();
-          if (!title) return;
+          if (!title) return null;
           const intent = (this.aiResult && this.aiResult.intent) || {};
-          axios.post('/ai/resolve_path', {
+          // 返回 promise：调用方要在「规则预设已经换好」之后再分析，
+          // 否则分析用的是上一部剧的规则，列表里的文件名还是旧的
+          return axios.post('/ai/resolve_path', {
             title: title,
             aliases: intent.aliases || [],
             season: this.aiForm.season === '' ? null : this.aiForm.season,
@@ -1522,6 +1619,15 @@
             if (res.success) this.aiApplyResolved(res.data);
             else this.aiError = res.message || '解析入库路径失败';
           }).catch(error => { this.aiError = '解析入库路径失败：' + error; });
+        },
+        // 先解析（换规则预设）再分析：两步必须串行，并行会让列表沿用旧规则
+        aiResolveThenAnalyze() {
+          const p = this.aiResolvePath();
+          if (p && typeof p.then === 'function') {
+            p.then(() => this.aiAnalyze()).catch(() => this.aiAnalyze());
+          } else {
+            this.aiAnalyze();
+          }
         },
         // 直接分析粘贴进来的链接（搜索源没收录的分享走这条）
         aiAnalyzeDirect() {
@@ -1547,8 +1653,7 @@
           this.aiCandidatesCollapsed = true;
           // 先解析入库位置，再分析（分析要用到 savepath）
           this.$nextTick(() => {
-            this.aiResolvePath();
-            this.aiAnalyze();
+            this.aiResolveThenAnalyze();
           });
         },
         aiSearch() {
@@ -1598,6 +1703,12 @@
                 this.aiResolved = null;
                 this.aiBaselinePath = '';
                 this.aiForm.savepath = (base && base.savepath) || '/';
+                // 没解析出入库路径也要按类型选预设，不能沿用上一条任务的规则
+                const preset = this.aiPatternFor(this.aiForm.category);
+                if (preset && !this.aiPatternTouched) {
+                  this.aiForm.pattern = preset.pattern;
+                  this.aiForm.replace = preset.replace;
+                }
               }
             })
             .catch(error => { this.aiError = '搜索请求失败：' + error; })
@@ -1623,7 +1734,10 @@
           this.aiAnalysis = null;
           this.aiCommitLog = '';
           this.aiFilter = 'all';
-          this.aiAnalyze();
+          // 换链接可能换了类型（综艺↔剧集），规则预设要按新类型重新匹配：
+          // 复位「手动改过」标记，先解析入库位置再分析（分析要用到 savepath）
+          this.aiPatternTouched = false;
+          this.aiResolveThenAnalyze();
         },
         // 看某个候选分享里最新的文件（标题判断不出更新到哪一集，合集类尤其容易误判）
         aiCheckLatest(cand) {
@@ -1962,8 +2076,10 @@
         },
         checkNewVersion() {
           this.versionTips = this.version;
-          axios.get('https://api.github.com/repos/Cp0204/quark-auto-save/tags')
+          // 更新监测指向自己的仓库（fork）；仓库没有 tag 时静默跳过，不报错
+          axios.get('https://api.github.com/repos/ggllss/quark-auto-save/tags')
             .then(response => {
+              if (!Array.isArray(response.data) || !response.data.length) return;
               latestVersion = response.data[0].name;
               console.log(`检查版本：当前 ${this.version} 最新 ${latestVersion}`);
               if (latestVersion != this.version) {
@@ -2024,11 +2140,16 @@
                 api_key: "",
                 model: "",
                 timeout: 60,
-                media_roots: {}
+                media_roots: {},
+                categories: [],
+                pattern_map: {}
               }, config_data.ai || {});
               if (!config_data.ai.media_roots || typeof config_data.ai.media_roots !== 'object') {
                 config_data.ai.media_roots = {};
               }
+              // 类型列表：内置五个永远在，配置里漏掉也补齐（与后端 _type_names() 同规则）
+              config_data.ai.categories = aiNormalizeCategories(config_data.ai.categories);
+              this.aiCategoryOptions = config_data.ai.categories.slice();
               // 类型目录的键要在对象变成响应式之前建好，否则输入框绑不上
               this.aiCategoryOptions.forEach(function (t) {
                 if (config_data.ai.media_roots[t] === undefined) config_data.ai.media_roots[t] = '';
