@@ -561,3 +561,62 @@ def movie_year(api_key, title):
         return ""
     release = detail.get("release_date") or ""
     return release[:4] if release[:4].isdigit() else ""
+
+
+_picked_show = {}   # (剧名, 季) → 命中的 TMDB 剧集 id
+
+
+def episode_for_date_any(api_key, name, season, date):
+    return _cached(
+        ("ep_any", name, season, date),
+        lambda: _episode_for_date_any(api_key, name, season, date),
+    )
+
+
+def _episode_for_date_any(api_key, name, season, date):
+    """
+    在搜索结果的**多个候选剧集**里，找哪个的该季包含这个播出日期。
+
+    resolve_show 只按名字取最像的一个，容易匹配到衍生节目：
+    「五哈」会命中「五哈和他们的朋友」（12 集，没有 06-28），
+    而真正在更新的是「哈哈哈哈哈」（36 集，06-28 是 E23）。
+    """
+    if not api_key or not name or not season or not date:
+        return None
+    # 一旦某个日期命中了某部剧，就锁定它：同一分享里后面几十个日期
+    # 只查这一部，不用每次把 4 个候选都试一遍（实测能把冷启动从 45s 压到 10s 内）
+    pinned = _picked_show.get((name, season))
+    if pinned:
+        candidates = [{"id": pinned, "name": ""}]
+    else:
+        try:
+            candidates = search_series(api_key, name) or []
+        except Exception:  # noqa: BLE001
+            return None
+    for cand in candidates[:4]:
+        tv_id = cand.get("id")
+        if not tv_id:
+            continue
+        # 该剧没有这一季时 season_episodes 会抛异常。异常不缓存的话，
+        # 每一行都要重新请求一次 404（实测一次查询白花 3.5 秒）。
+        # 这里把「查不到」也缓存成空列表。
+        try:
+            episodes = _cached(
+                ("season", tv_id, season),
+                lambda tid=tv_id: season_episodes(api_key, tid, season),
+            )
+        except Exception:  # noqa: BLE001
+            episodes = []
+            with _lock:
+                _cache[("season", tv_id, season)] = (time.time(), [])
+        for ep in episodes:
+            if (ep.get("air_date") or "") == date:
+                number = ep.get("number")
+                if isinstance(number, int):
+                    _picked_show[(name, season)] = tv_id
+                    return {
+                        "number": number,
+                        "show": cand.get("name") or "",
+                        "tv_id": tv_id,
+                    }
+    return None

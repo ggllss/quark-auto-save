@@ -2230,17 +2230,34 @@ def ai_analyze():
             # 综艺一期分上下集时「第2期上」「第2期下」的期号都是 2，
             # 只按期号会双双变成 E02 → 撞名，还会被误判成重复文件。
             # （现在就出发 S04：第2期上=2026-10-17=E03、第2期下=2026-10-18=E04）
-            if not is_movie and not is_extra and row_season and tmdb_key:
+            # 季号优先用目标目录里的 Sxx（用户明确指定的），
+            # 再退回行内识别、分享识别——分享里的 Sxx 经常是垃圾值
+            _tail_sp = savepath_norm.rstrip("/").rsplit("/", 1)[-1] or ""
+            _sp_season = int(_tail_sp[1:]) if re.fullmatch(r"[Ss]\d{1,2}", _tail_sp) else None
+            _ep_season = row_season or _sp_season or share_season
+            if not is_movie and not is_extra and _ep_season and tmdb_key:
                 _air_d = _air_date(name, f.get("dir_path"))
                 if _air_d:
                     try:
-                        _ep_t = tmdb.episode_for_date(tmdb_key, taskname, row_season, _air_d)
+                        # 先在多个候选剧集里按日期反查（避免匹配到衍生节目），
+                        # 查不到再退回按名字解析的那一个
+                        _hit = tmdb.episode_for_date_any(
+                            tmdb_key, taskname, _ep_season, _air_d
+                        )
+                        _ep_t = (_hit or {}).get("number") or tmdb.episode_for_date(
+                            tmdb_key, taskname, _ep_season, _air_d
+                        )
                     except Exception:  # noqa: BLE001
                         _ep_t = None
                     if _ep_t:
                         _fixed = re.sub(
                             r"([Ss]\d{2})[Ee]\d{1,3}", r"\g<1>E%02d" % _ep_t, row["new_name"]
                         )
+                        if _fixed == row["new_name"]:
+                            # 综艺模板是「剧名.E12.第12期下」，没有 Sxx 前缀
+                            _fixed = re.sub(
+                                r"\.E\d{1,3}", ".E%02d" % _ep_t, row["new_name"], count=1
+                            )
                         if _fixed != row["new_name"]:
                             row["new_name"] = _fixed
                             row["tmdb_episode"] = _ep_t
