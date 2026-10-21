@@ -14,17 +14,27 @@
 
 > ## 📌 关于这个分支
 >
-> 本项目 fork 自 **[Cp0204/quark-auto-save](https://github.com/Cp0204/quark-auto-save)**（基于上游 `v0.8.7`），原始设计与全部基础功能归原作者所有。
-> 本分支在原项目基础上，把「AI 追剧」这一块做得更省心一些：
+> 本项目 fork 自 **[Cp0204/quark-auto-save](https://github.com/Cp0204/quark-auto-save)**（基于上游 `v0.8.7`）。上游专注夸克网盘签到、定时转存、正则命名、插件刷新与推送通知；**本分支在此基础上新增了整套「AI 追剧」功能**——新增 `app/ai.py`、`app/tmdb.py` 与两个测试文件，`app/run.py` 由 658 行扩到 3400+ 行，前端页面同步重做。
 >
-> | 特点 | 用起来是什么样 |
+> ### AI 追剧：从剧名到入库一条龙
+>
+> | 环节 | 做了什么 |
 > | --- | --- |
-> | **分类目录自己定** | 除了电视剧 / 电影 / 动漫 / 综艺 / 纪录片，还能加「短剧」「体育」这类自己的分类，入库时各走各的目录 |
-> | **命名规则跟着类型走** | 综艺用期号模板、剧集用 `SxxExx`、电影用年份，换一部剧不用每次手动挑预设；想换映射也能配 |
-> | **片源再脏也认得出集号** | 文件名里堆着 `[4K][HEVC,AAC][2026.10.15]` 这种标签时，不会被日期里的数字骗到；「黄风岭篇 13」这类「篇N」写法也认 |
-> | **分篇动画落到正确的季** | 「狐妖小红娘 黄风岭篇」会认到黄风岭篇那一季（S13），而不是把全部篇塞进合并版的第一季 |
+> | **找片源** | 输入剧名即可。本地规则先拆剧名与季号，TMDB 补中英文别名和剧种，再用多个搜索源（PanSou 多实例 + CloudSaver）并发检索；结果按剧名命中、季号、画质、新鲜度打分，剔除失效链接，还会读取分享里最新的文件按更新程度排序 |
+> | **定位置** | 自动判断是电视剧 / 电影 / 动漫 / 综艺 / 纪录片，在网盘对应分类目录下找同名文件夹，命中就存进去、没有就新建，分季自动套 `S0X` |
+> | **逐集比对** | 展开分享里的每一集，与库里已有文件逐条比对，标出「可新增 / 已在库 / 疑似重复 / 命名异常」。综艺靠「第N期 + 上/下 + 标记词」的内容特征判重，不依赖集号 |
+> | **命名** | 内置 `$TV_MAGIC` / `$SHOW_MAGIC` / `$MOVIE_MAGIC` 三套预设并按类型自动匹配；综艺上下集按 `(N-1)*2+1/2` 算集号；花絮统一收进 S00 特辑季；电影按「片名 (年份)」建目录 |
+> | **入库** | 勾选即转存，复用原项目的转存引擎，按算好的名字落盘，完成后触发插件刷新媒体库并推送通知 |
 >
-> 只动了「AI 追剧」相关代码，转存引擎、插件、通知等原项目功能保持原样。
+> ### 另外几个细节
+>
+> - **分类目录可以自己加**：内置五类之外，可在设置页新增分类（如「短剧」「体育」），入库时各走各的目录，新增分类按剧集规则处理
+> - **片源再脏也认得出集号**：文件名堆着 `[4K][HEVC,AAC][2026.10.15]` 这种标签时不会被日期里的数字骗到；「黄风岭篇 13」这类「篇N」写法也认；文件名明确集号与 TMDB 日期反查冲突时以文件名为准；分篇动画会认到对应那一季（如「狐妖小红娘 黄风岭篇」→ S13），不再全塞进合并版的第一季
+> - **带回归测试**：上游没有测试目录，本分支补了 `tests/test_ai.py`（覆盖意图解析降级、排序、路径解析、分享展开、内容去重、花絮路由、TMDB 特辑匹配、电影模式等）与 `tests/test_frontend.js`（含真实 Vue 模板渲染校验）
+>
+> ### 与原项目的关系
+>
+> 转存引擎、插件、通知等上游功能保持原样；改动集中在 `app/`（新增 `ai.py`、`tmdb.py`，扩写 `run.py` 与前端页面）。
 
 [![zread](https://img.shields.io/badge/Ask_AI-_.svg?style=flat&color=00b0aa&labelColor=000000&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQuOTYxNTYgMS42MDAxSDIuMjQxNTZDMS44ODgxIDEuNjAwMSAxLjYwMTU2IDEuODg2NjQgMS42MDE1NiAyLjI0MDFWNC45NjAxQzEuNjAxNTYgNS4zMTM1NiAxLjg4ODEgNS42MDAxIDIuMjQxNTYgNS42MDAxSDQuOTYxNTZDNS4zMTUwMiA1LjYwMDEgNS42MDE1NiA1LjMxMzU2IDUuNjAxNTYgNC45NjAxVjIuMjQwMUM1LjYwMTU2IDEuODg2NjQgNS4zMTUwMiAxLjYwMDEgNC45NjE1NiAxLjYwMDFaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00Ljk2MTU2IDEwLjM5OTlIMi4yNDE1NkMxLjg4ODEgMTAuMzk5OSAxLjYwMTU2IDEwLjY4NjQgMS42MDE1NiAxMS4wMzk5VjEzLjc1OTlDMS42MDE1NiAxNC4xMTM0IDEuODg4MSAxNC4zOTk5IDIuMjQxNTYgMTQuMzk5OUg0Ljk2MTU2QzUuMzE1MDIgMTQuMzk5OSA1LjYwMTU2IDE0LjExMzQgNS42MDE1NiAxMy43NTk5VjExLjAzOTlDNS42MDE1NiAxMC42ODY0IDUuMzE1MDIgMTAuMzk5OSA0Ljk2MTU2IDEwLjM5OTlaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik0xMy43NTg0IDEuNjAwMUgxMS4wMzg0QzEwLjY4NSAxLjYwMDEgMTAuMzk4NCAxLjg4NjY0IDEwLjM5ODQgMi4yNDAxVjQuOTYwMUMxMC4zOTg0IDUuMzEzNTYgMTAuNjg1IDUuNjAwMSAxMS4wMzg0IDUuNjAwMUgxMy43NTg0QzE0LjExMTkgNS42MDAxIDE0LjM5ODQgNS4zMTM1NiAxNC4zOTg0IDQuOTYwMVYyLjI0MDFDMTQuMzk4NCAxLjg4NjY0IDE0LjExMTkgMS42MDAxIDEzLjc1ODQgMS42MDAxWiIgZmlsbD0iI2ZmZiIvPgo8cGF0aCBkPSJNNCAxMkwxMiA0TDQgMTJaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00IDEyTDEyIDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K&logoColor=ffffff)](https://zread.ai/Cp0204/quark-auto-save) [![skill](https://img.shields.io/badge/🦞-ClawHub%20Skill-orange?logo=openclaw)](https://clawhub.ai/Cp0204/quark-auto-save)
 
