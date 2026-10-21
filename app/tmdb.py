@@ -292,13 +292,28 @@ def specials_for_show(api_key, taskname, filenames, season=None):
     """
     if not api_key or not filenames:
         return {}
-    tv_id = resolve_show(api_key, taskname)
-    if not tv_id:
-        return {}
+    # 特辑季要挂在「正主」剧集下：搜「五哈」会先命中衍生节目
+    # 「五哈和他们的朋友」，它的 S00 集号和正主「哈哈哈哈哈」差很多。
+    # 这里在前几个候选里挑特辑集数最多的那个。
+    best_id, best_eps = None, []
     try:
-        episodes = season_episodes(api_key, tv_id, 0)
+        cands = search_series(api_key, taskname) or []
     except Exception:  # noqa: BLE001
+        cands = []
+    ids = [c.get("id") for c in cands[:4] if c.get("id")]
+    if not ids:
+        rid = resolve_show(api_key, taskname)
+        ids = [rid] if rid else []
+    for tid in ids:
+        try:
+            eps = season_episodes(api_key, tid, 0)
+        except Exception:  # noqa: BLE001
+            continue
+        if len(eps) > len(best_eps):
+            best_id, best_eps = tid, eps
+    if not best_id:
         return {}
+    episodes = best_eps
     out = {}
     for fn in filenames:
         hit = match_special(episodes, fn, season)

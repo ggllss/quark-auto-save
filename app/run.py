@@ -2376,42 +2376,35 @@ def ai_analyze():
         if _r.get("ep_from_name") and _r.get("status") == "new":
             _r["status_text"] = "可新增（按集号命名）"
 
-    # 综艺/剧集：TMDB 没给集号的行，按「季 + 期号 + 上下集」本地累加，
-    # 保证上下集不共用同一个 E（第10期上=E10、第10期下=E11、第11期上=E12…）。
-    # 规则：E = max(期号, 上一个 E + 1)，既跟随期号又单调递增。
-    if not is_movie:
-        _pending_ep = []
+    # 综艺正片集号：第N期上 = (N-1)*2+1，第N期下 = (N-1)*2+2。
+    # 这是确定的算术关系，不该依赖 TMDB（之前绕去查 TMDB，查错剧就算成 E19）。
+    if category == "综艺":
         for _r in rows:
             if _r.get("aux") or _r.get("dir") or _r.get("is_extra"):
                 continue
-            if _r.get("tmdb_episode"):
-                continue          # TMDB 已经给了准确集号，不动
             _fn = _r.get("file_name") or ""
             _m_pn = re.search(r"第\s*(\d{1,3})\s*[期集]", _fn) or re.search(
                 r"^\s*(\d{1,3})\s*[期集]", _fn
             )
             if not _m_pn:
                 continue
-            _part = 1 if re.search(r"[下后]", _fn) else 0
-            _pending_ep.append(
-                (int(_m_pn.group(1)), _part, _r.get("season_label") or "", _r)
-            )
-        _pending_ep.sort(key=lambda x: (x[2], x[0], x[1]))
-        _prev_ep = 0
-        _cur_season = None
-        for _pn, _part, _sw, _r in _pending_ep:
-            if _sw != _cur_season:
-                _cur_season, _prev_ep = _sw, 0
-            _ep_local = max(_pn, _prev_ep + 1)
-            _prev_ep = _ep_local
+            _n = int(_m_pn.group(1))
+            # 只看「第N期」紧跟的那个字，避免标题里的「传下去」「上下集」误判
+            _tail_ch = _fn[_m_pn.end() : _m_pn.end() + 1]
+            if _tail_ch in ("下", "后"):
+                _ep = (_n - 1) * 2 + 2
+            elif _tail_ch == "上":
+                _ep = (_n - 1) * 2 + 1
+            else:
+                _ep = _n          # 不分上下集，期号就是集号
             _nm = _r.get("new_name") or ""
-            _fixed2 = re.sub(r"\.E\d{1,3}", ".E%02d" % _ep_local, _nm, count=1)
+            _fixed2 = re.sub(r"\.E\d{1,3}", ".E%02d" % _ep, _nm, count=1)
             if _fixed2 == _nm:
                 _fixed2 = re.sub(
-                    r"([Ss]\d{2})[Ee]\d{1,3}", r"\g<1>E%02d" % _ep_local, _nm, count=1
+                    r"([Ss]\d{2})[Ee]\d{1,3}", r"\g<1>E%02d" % _ep, _nm, count=1
                 )
             _r["new_name"] = _fixed2
-            _r["ep_local"] = _ep_local
+            _r["ep_local"] = _ep
 
     # 海报/nfo 这类辅助文件单独标一下，别混在「不匹配规则」里
     for _r in rows:
