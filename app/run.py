@@ -2180,7 +2180,7 @@ def ai_analyze():
                 if _num and re.search(r"\{I+\}", _tpl):
                     # 把模板里的 {II} 换成 TMDB 的真实集号（补齐两位，和库里一致）
                     _tpl = re.sub(r"\{I+\}", str(_num).zfill(2), _tpl)
-                    row["tmdb_episode"] = _num
+                    row["ep_from_period"] = _num   # 期号，不是 TMDB 集号
                 # {SXX} 用目标目录的季号：综艺文件名里没有季标记，
                 # 让 MagicRename 从文件名猜会退回 S01（用户踩过这个坑）
                 if _season_label and re.search(r"\{SXX\}", _tpl):
@@ -2375,6 +2375,43 @@ def ai_analyze():
     for _r in rows:
         if _r.get("ep_from_name") and _r.get("status") == "new":
             _r["status_text"] = "可新增（按集号命名）"
+
+    # 综艺/剧集：TMDB 没给集号的行，按「季 + 期号 + 上下集」本地累加，
+    # 保证上下集不共用同一个 E（第10期上=E10、第10期下=E11、第11期上=E12…）。
+    # 规则：E = max(期号, 上一个 E + 1)，既跟随期号又单调递增。
+    if not is_movie:
+        _pending_ep = []
+        for _r in rows:
+            if _r.get("aux") or _r.get("dir") or _r.get("is_extra"):
+                continue
+            if _r.get("tmdb_episode"):
+                continue          # TMDB 已经给了准确集号，不动
+            _fn = _r.get("file_name") or ""
+            _m_pn = re.search(r"第\s*(\d{1,3})\s*[期集]", _fn) or re.search(
+                r"^\s*(\d{1,3})\s*[期集]", _fn
+            )
+            if not _m_pn:
+                continue
+            _part = 1 if re.search(r"[下后]", _fn) else 0
+            _pending_ep.append(
+                (int(_m_pn.group(1)), _part, _r.get("season_label") or "", _r)
+            )
+        _pending_ep.sort(key=lambda x: (x[2], x[0], x[1]))
+        _prev_ep = 0
+        _cur_season = None
+        for _pn, _part, _sw, _r in _pending_ep:
+            if _sw != _cur_season:
+                _cur_season, _prev_ep = _sw, 0
+            _ep_local = max(_pn, _prev_ep + 1)
+            _prev_ep = _ep_local
+            _nm = _r.get("new_name") or ""
+            _fixed2 = re.sub(r"\.E\d{1,3}", ".E%02d" % _ep_local, _nm, count=1)
+            if _fixed2 == _nm:
+                _fixed2 = re.sub(
+                    r"([Ss]\d{2})[Ee]\d{1,3}", r"\g<1>E%02d" % _ep_local, _nm, count=1
+                )
+            _r["new_name"] = _fixed2
+            _r["ep_local"] = _ep_local
 
     # 海报/nfo 这类辅助文件单独标一下，别混在「不匹配规则」里
     for _r in rows:
